@@ -1,0 +1,115 @@
+<mujoco model="deskbot">
+  <!--
+    DeskBot — Self-balancing two-wheeled desktop robot (~25 cm tall).
+    Coordinate system: X=forward, Y=left, Z=up.
+
+    This file describes the robot only (no environment).
+    Use scene.xml for a complete simulation with ground and lighting.
+  -->
+
+  <compiler angle="radian"/>
+
+  <default>
+    <joint damping="0.008" armature="0.001"/>
+    <geom friction="1.2 0.005 0.001" condim="4" contype="1" conaffinity="1"
+          solref="0.005 1.0"/>
+    <motor ctrlrange="-3.0 3.0"/>
+
+    <default class="wheel">
+      <joint damping="0.003"/>
+      <geom material="tire" mass="0.05"/>
+    </default>
+    <default class="hub">
+      <geom material="wheel" contype="0" conaffinity="0" mass="0.005"/>
+    </default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" mass="0.001"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="chassis" rgba="0.18 0.20 0.24 1" specular="0.6" shininess="0.4"/>
+    <material name="body"    rgba="0.22 0.50 0.72 1" specular="0.5" shininess="0.3"/>
+    <material name="accent"  rgba="0.90 0.35 0.15 1" specular="0.4" shininess="0.2"/>
+    <material name="screen"  rgba="0.15 0.85 0.55 1" specular="0.8" shininess="0.9"
+              emission="0.4"/>
+    <material name="wheel"   rgba="0.12 0.12 0.12 1" specular="0.2" shininess="0.05"/>
+    <material name="tire"    rgba="0.08 0.08 0.08 1" specular="0.05" shininess="0.01"/>
+  </asset>
+
+  <worldbody>
+    <body name="chassis" pos="0 0 0.04">
+      <joint type="free"/>
+      <inertial pos="0 0 0.12" mass="0.586" diaginertia="0.001 0.001 0.0005"/>
+
+      <!-- Motor housing (base) -->
+      <geom name="base" type="box" size="0.04 0.055 0.025"
+            pos="0 0 0.025" mass="0.12" material="chassis"/>
+
+      <!-- Main body column -->
+      <geom name="column" type="box" size="0.028 0.042 0.055"
+            pos="0 0 0.105" mass="0.08" material="body"/>
+
+      <!-- Battery compartment -->
+      <geom name="battery" type="box" size="0.032 0.048 0.035"
+            pos="0 0 0.19" mass="0.30" material="body"/>
+
+      <!-- Head / sensor pod -->
+      <geom name="head" type="box" size="0.026 0.038 0.018"
+            pos="0 0 0.245" mass="0.08" material="accent"/>
+
+      <!-- Front screen / LED indicator -->
+      <geom name="screen" type="box" size="0.001 0.025 0.012"
+            pos="0.033 0 0.19" material="screen" class="visual"/>
+
+      <!-- Face indicator -->
+      <geom name="face" type="box" size="0.001 0.015 0.008"
+            pos="0.027 0 0.245" material="screen" class="visual"/>
+
+      <!-- IMU sensor site (near CoM) -->
+      <site name="imu" pos="0 0 0.12" size="0.003" rgba="1 0 0 0.5"/>
+
+      <!-- Camera mount site (on head, forward-facing) -->
+      <site name="cam_mount" pos="0.026 0 0.245" zaxis="1 0 0" size="0.005"
+            rgba="0.2 0.2 0.2 1"/>
+
+      <!-- Left wheel -->
+      <body name="wheel_L" pos="0 0.07 0">
+        <joint name="wheel_L" type="hinge" axis="0 1 0" class="wheel"/>
+        <geom name="tire_L" type="cylinder" size="0.04 0.009"
+              euler="1.5708 0 0" class="wheel"/>
+        <geom name="hub_L" type="cylinder" size="0.018 0.01"
+              euler="1.5708 0 0" class="hub"/>
+      </body>
+
+      <!-- Right wheel -->
+      <body name="wheel_R" pos="0 -0.07 0">
+        <joint name="wheel_R" type="hinge" axis="0 1 0" class="wheel"/>
+        <geom name="tire_R" type="cylinder" size="0.04 0.009"
+              euler="1.5708 0 0" class="wheel"/>
+        <geom name="hub_R" type="cylinder" size="0.018 0.01"
+              euler="1.5708 0 0" class="hub"/>
+      </body>
+
+      <!-- Robot-attached cameras -->
+      <camera name="follow" mode="track" pos="0.6 -0.4 0.35"
+              xyaxes="0.6 1 0 -0.2 0 1"/>
+      <camera name="onboard" mode="fixed" pos="0.04 0 0.25"
+              xyaxes="0 -1 0 0 0 1"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor joint="wheel_L" name="motor_L" gear="1"/>
+    <motor joint="wheel_R" name="motor_R" gear="1"/>
+  </actuator>
+
+  <sensor>
+    <!-- IMU (MPU6050-like): accelerometer + gyroscope -->
+    <accelerometer name="accel" site="imu"/>
+    <gyro          name="gyro"  site="imu"/>
+    <!-- Wheel encoders: angular velocity -->
+    <jointvel name="enc_L" joint="wheel_L"/>
+    <jointvel name="enc_R" joint="wheel_R"/>
+  </sensor>
+</mujoco>

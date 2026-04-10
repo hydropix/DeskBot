@@ -1,0 +1,219 @@
+<mujoco model="deskbot_skatepark">
+  <!--
+    DeskBot skatepark scene.
+    Obstacles are scaled for a ~25cm robot with 4cm wheels.
+    Layout: robot starts at origin facing +X.
+
+         +Y (left)
+          |
+    -X ---+--- +X (forward)
+          |
+         -Y (right)
+  -->
+
+  <include file="deskbot.xml"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast">
+    <flag multiccd="enable"/>
+  </option>
+
+  <visual>
+    <headlight diffuse="0.5 0.5 0.5" ambient="0.3 0.3 0.3"/>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <statistic center="0 0 0.15" extent="2.0"/>
+
+  <asset>
+    <!-- Ground -->
+    <texture type="2d" name="grid_tex" builtin="checker" width="512" height="512"
+             rgb1="0.25 0.25 0.27" rgb2="0.30 0.30 0.32"
+             mark="edge" markrgb="0.33 0.33 0.35"/>
+    <material name="ground" texture="grid_tex" texrepeat="20 20"
+              specular="0.15" shininess="0.1" reflectance="0.05"/>
+
+    <!-- Obstacle materials -->
+    <material name="concrete" rgba="0.55 0.53 0.50 1" specular="0.2" shininess="0.1"/>
+    <material name="ramp"     rgba="0.45 0.50 0.55 1" specular="0.3" shininess="0.15"/>
+    <material name="rail"     rgba="0.70 0.72 0.75 1" specular="0.7" shininess="0.5"/>
+    <material name="curb"     rgba="0.60 0.55 0.48 1" specular="0.15" shininess="0.08"/>
+    <material name="bump"     rgba="0.50 0.48 0.45 1" specular="0.2" shininess="0.1"/>
+    <material name="pipe"     rgba="0.40 0.45 0.52 1" specular="0.35" shininess="0.2"/>
+    <material name="zone"     rgba="0.9 0.9 0.2 0.4" specular="0" shininess="0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Lighting -->
+    <light pos="1.5 -1.5 3.0" dir="-0.3 0.3 -1" diffuse="0.8 0.78 0.75" castshadow="true"/>
+    <light pos="-1.0 1.5 2.5" dir="0.3 -0.3 -1" diffuse="0.3 0.3 0.35" castshadow="false"/>
+    <light pos="0 0 3.0" dir="0 0 -1" diffuse="0.2 0.2 0.2" castshadow="false"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" type="plane" size="5 5 0.05" material="ground"
+          contype="1" conaffinity="1"/>
+
+    <!-- Start zone marker -->
+    <geom type="box" size="0.12 0.12 0.0005" pos="0 0 0.001" material="zone"
+          contype="0" conaffinity="0"/>
+
+    <!-- ============================================================
+         ZONE 1: GENTLE RAMP (forward +X)
+         A smooth incline to a small elevated platform.
+         ============================================================ -->
+
+    <!-- Ramp: 30cm long, 20cm wide, rises 4cm — ~7.6 deg incline -->
+    <geom name="ramp_gentle" type="box" size="0.15 0.10 0.005"
+          pos="0.45 0 0.02" euler="0 -0.133 0"
+          material="ramp" friction="1.0 0.005 0.001"/>
+
+    <!-- Platform at top of ramp: 15cm x 20cm, 4cm high -->
+    <geom name="platform_1" type="box" size="0.075 0.10 0.02"
+          pos="0.675 0 0.02"
+          material="concrete" friction="1.0 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 2: STEEP RAMP + DROP (far +X)
+         A steeper ramp (~15 deg) leading to a higher platform.
+         ============================================================ -->
+
+    <!-- Steep ramp: 25cm long, rises 6.5cm — ~15 deg -->
+    <geom name="ramp_steep" type="box" size="0.125 0.10 0.005"
+          pos="0.95 0 0.053" euler="0 -0.262 0"
+          material="ramp" friction="1.0 0.005 0.001"/>
+
+    <!-- High platform: 20cm x 20cm, 8cm high -->
+    <geom name="platform_high" type="box" size="0.10 0.10 0.04"
+          pos="1.20 0 0.04"
+          material="concrete" friction="1.0 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 3: SPEED BUMPS (right side, -Y)
+         Series of small bumps to test suspension/balance.
+         ============================================================ -->
+
+    <!-- Bump 1: 1.5cm tall half-cylinder approximated as capsule -->
+    <geom name="bump_1" type="capsule" size="0.015 0.10"
+          pos="0.15 -0.40 0.015" euler="1.5708 0 0"
+          material="bump" friction="1.0 0.005 0.001"/>
+
+    <!-- Bump 2 -->
+    <geom name="bump_2" type="capsule" size="0.015 0.10"
+          pos="0.30 -0.40 0.015" euler="1.5708 0 0"
+          material="bump" friction="1.0 0.005 0.001"/>
+
+    <!-- Bump 3 -->
+    <geom name="bump_3" type="capsule" size="0.015 0.10"
+          pos="0.45 -0.40 0.015" euler="1.5708 0 0"
+          material="bump" friction="1.0 0.005 0.001"/>
+
+    <!-- Bump 4 -->
+    <geom name="bump_4" type="capsule" size="0.015 0.10"
+          pos="0.60 -0.40 0.015" euler="1.5708 0 0"
+          material="bump" friction="1.0 0.005 0.001"/>
+
+    <!-- Bump 5: bigger one at the end -->
+    <geom name="bump_5" type="capsule" size="0.02 0.10"
+          pos="0.78 -0.40 0.02" euler="1.5708 0 0"
+          material="bump" friction="1.0 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 4: CURB / LEDGE (left side, +Y)
+         A step the robot can try to climb or ride along.
+         ============================================================ -->
+
+    <!-- Low curb: 3cm tall, 60cm long -->
+    <geom name="curb" type="box" size="0.30 0.04 0.015"
+          pos="0.40 0.35 0.015"
+          material="curb" friction="1.2 0.005 0.001"/>
+
+    <!-- Higher step behind the curb -->
+    <geom name="step" type="box" size="0.30 0.06 0.03"
+          pos="0.40 0.45 0.03"
+          material="curb" friction="1.2 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 5: HALF-PIPE (back left, -X +Y)
+         Two opposing ramps with a flat bottom.
+         ============================================================ -->
+
+    <!-- Left wall of half-pipe (~20 deg) -->
+    <geom name="halfpipe_L" type="box" size="0.20 0.005 0.12"
+          pos="-0.50 0.42 0.06" euler="0 0 -0.35"
+          material="pipe" friction="1.0 0.005 0.001"/>
+
+    <!-- Right wall of half-pipe -->
+    <geom name="halfpipe_R" type="box" size="0.20 0.005 0.12"
+          pos="-0.50 0.18 0.06" euler="0 0 0.35"
+          material="pipe" friction="1.0 0.005 0.001"/>
+
+    <!-- Floor of half-pipe -->
+    <geom name="halfpipe_floor" type="box" size="0.20 0.08 0.003"
+          pos="-0.50 0.30 0.003"
+          material="pipe" friction="0.8 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 6: GRIND RAIL (diagonal, center-right)
+         Elevated narrow rail.
+         ============================================================ -->
+
+    <!-- Rail: capsule 50cm long, 1cm diameter, 3cm off ground -->
+    <geom name="rail" type="capsule" size="0.005 0.25"
+          pos="0.0 -0.25 0.03" euler="0 1.5708 0.3"
+          material="rail" friction="0.3 0.001 0.001"/>
+
+    <!-- Rail supports -->
+    <geom name="rail_post_1" type="cylinder" size="0.01 0.015"
+          pos="-0.21 -0.185 0.015"
+          material="rail"/>
+    <geom name="rail_post_2" type="cylinder" size="0.01 0.015"
+          pos="0.21 -0.315 0.015"
+          material="rail"/>
+
+    <!-- ============================================================
+         ZONE 7: FUNBOX (center area, slightly offset)
+         A raised box with ramps on two sides.
+         ============================================================ -->
+
+    <!-- Central box: 20cm x 20cm, 5cm tall -->
+    <geom name="funbox" type="box" size="0.10 0.10 0.025"
+          pos="-0.30 -0.35 0.025"
+          material="concrete" friction="1.0 0.005 0.001"/>
+
+    <!-- Ramp up (approaching from +X side) -->
+    <geom name="funbox_ramp_front" type="box" size="0.10 0.10 0.005"
+          pos="-0.10 -0.35 0.025" euler="0 0.245 0"
+          material="ramp" friction="1.0 0.005 0.001"/>
+
+    <!-- Ramp down (leaving from -X side) -->
+    <geom name="funbox_ramp_back" type="box" size="0.10 0.10 0.005"
+          pos="-0.50 -0.35 0.025" euler="0 -0.245 0"
+          material="ramp" friction="1.0 0.005 0.001"/>
+
+    <!-- ============================================================
+         ZONE 8: SLALOM PYLONS (far right, -Y)
+         Small obstacles for weaving through.
+         ============================================================ -->
+
+    <geom name="pylon_1" type="cylinder" size="0.02 0.04"
+          pos="-0.20 -0.60 0.04" material="curb"/>
+    <geom name="pylon_2" type="cylinder" size="0.02 0.04"
+          pos="-0.05 -0.50 0.04" material="curb"/>
+    <geom name="pylon_3" type="cylinder" size="0.02 0.04"
+          pos="0.10 -0.60 0.04" material="curb"/>
+    <geom name="pylon_4" type="cylinder" size="0.02 0.04"
+          pos="0.25 -0.50 0.04" material="curb"/>
+    <geom name="pylon_5" type="cylinder" size="0.02 0.04"
+          pos="0.40 -0.60 0.04" material="curb"/>
+
+    <!-- ============================================================
+         ZONE 9: TILTED PLATE (far back, -X)
+         An off-camber surface to test lateral balance.
+         ============================================================ -->
+
+    <geom name="tilt_plate" type="box" size="0.20 0.15 0.004"
+          pos="-0.60 0.0 0.03" euler="0.15 0 0"
+          material="ramp" friction="1.0 0.005 0.001"/>
+
+  </worldbody>
+</mujoco>

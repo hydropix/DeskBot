@@ -1,0 +1,45 @@
+<mujoco model="deskbot_scene">
+  <!--
+    DeskBot simulation scene.
+    Includes the robot model and adds environment (ground, lighting).
+  -->
+
+  <include file="deskbot.xml"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast">
+    <flag multiccd="enable"/>
+  </option>
+
+  <visual>
+    <headlight diffuse="0.5 0.5 0.5" ambient="0.3 0.3 0.3"/>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <statistic center="0 0 0.15" extent="0.6"/>
+
+  <asset>
+    <texture type="2d" name="grid_tex" builtin="checker" width="512" height="512"
+             rgb1="0.22 0.22 0.25" rgb2="0.28 0.28 0.30"
+             mark="edge" markrgb="0.3 0.3 0.3"/>
+    <material name="ground" texture="grid_tex" texrepeat="12 12"
+              specular="0.15" shininess="0.1" reflectance="0.1"/>
+    <material name="marker" rgba="0.9 0.9 0.2 0.6" specular="0" shininess="0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Lighting -->
+    <light pos="1 -1 2.5" dir="-0.4 0.4 -1" diffuse="0.7 0.7 0.7" castshadow="true"/>
+    <light pos="-1 1 2.0" dir="0.3 -0.3 -1" diffuse="0.3 0.3 0.35" castshadow="false"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" type="plane" size="5 5 0.05" material="ground"
+          contype="1" conaffinity="1"/>
+
+    <!-- Origin markers -->
+    <geom type="box" size="0.5 0.002 0.0005" pos="0 0 0.001" material="marker"
+          contype="0" conaffinity="0"/>
+    <geom type="box" size="0.002 0.5 0.0005" pos="0 0 0.001" material="marker"
+          contype="0" conaffinity="0"/>
+  </worldbody>
+</mujoco>

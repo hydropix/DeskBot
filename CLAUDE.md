@@ -1,0 +1,111 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+DeskBot is a MuJoCo-based simulator for a self-balancing two-wheeled desktop robot (~25 cm tall). The goal is to develop control algorithms that are portable to real hardware.
+
+## Commands
+
+```bash
+# Setup (or just run run.bat which auto-creates venv)
+python -m venv .venv && .venv/Scripts/activate && pip install -r requirements.txt
+
+# Run the simulator
+python -m deskbot
+```
+
+There are no tests or linters configured yet.
+
+## Architecture
+
+The codebase enforces a strict **sensor barrier**: the controller never reads simulator internals (`data.qpos`, `data.qvel`, etc.). All state flows through a realistic sensor pipeline:
+
+```
+MuJoCo physics → SensorModel (noise/bias) → SensorReadings → StateEstimator → BalanceController
+```
+
+### Key modules
+
+- **`robot.py`** — Physical constants (`WHEEL_RADIUS`, `WHEEL_SEPARATION`, `MAX_TORQUE`) and paths to MJCF model files. Constants must stay in sync with `models/deskbot.xml`.
+- **`sensors.py`** — `SensorModel` reads MuJoCo sensor data and adds MPU6050-like IMU noise (bias drift, white noise) and encoder tick quantization. `SensorReadings` is the only data the controller may consume.
+- **`control.py`** — `StateEstimator` fuses accelerometer + gyroscope via complementary filter and derives velocity/yaw from encoder odometry. `BalanceController` runs a cascaded loop: velocity PI (outer) → pitch PID (inner) + yaw P+D (differential steering).
+- **`sim.py`** — Real-time viewer loop at 60 fps / 500 Hz physics. Handles keyboard input (arrow keys for motion, Space for random push, R for reset).
+
+### MJCF models (`deskbot/models/`)
+
+- **`deskbot.xml`** — Robot-only definition (chassis, wheels, actuators, sensors). Uses MuJoCo defaults classes (`wheel`, `hub`, `visual`).
+- **`scene.xml`** — Includes `deskbot.xml` and adds ground plane, lighting, and visual markers. This is the file loaded by the simulator.
+
+Coordinate system: **X=forward, Y=left, Z=up**. Angles in radians.
+
+## Critical Constraints
+
+- **Never bypass the sensor barrier.** Controller and estimator code must only use `SensorReadings` fields (accel, gyro, encoder_left, encoder_right). Reading `data.qpos`/`data.qvel` in control code breaks the sim-to-real transfer goal.
+- **Sign conventions matter.** Pitch: positive = leaning forward. Torque: positive = drives wheel forward. Yaw: positive = turning left. Getting these wrong causes the balance loop to diverge instantly.
+- **Accelerometer includes gravity.** The `SensorModel` converts MuJoCo's coordinate acceleration to proper acceleration (what a real IMU measures) by adding gravity rotated into the body frame. The estimator uses `atan2(-ax, az)` for pitch — don't change this without understanding why the negation is there.
+
+## Pedagogical Mode (MANDATORY)
+
+
+Every response MUST end with a **"What to learn from this"** section.
+
+
+### Purpose
+
+
+The user is not just a client — he is also a learner who wants to deeply understand what was done and why. Every interaction is a training opportunity. The goal is to build lasting software engineering knowledge over time.
+
+
+### Structure
+
+
+Every pedagogical section MUST follow this two-part structure:
+
+
+#### 1. Plain-language introduction (mandatory)
+
+
+Start with a short, jargon-free explanation of **what just happened and why it matters**. Write as if explaining to someone who understands programming basics but has never encountered this specific technique or pattern. Use analogies, everyday comparisons, or "imagine…" framings when they help. This paragraph should make the reader feel oriented before any technical detail arrives.
+
+
+- Keep it to 2-4 sentences for trivial tasks, a short paragraph for medium ones.
+- No code references, no file paths, no technical terms that haven't been introduced yet.
+- Answer the question: "If I had to explain this to a friend over coffee, what would I say?"
+
+
+#### 2. Technical deep dive
+
+
+Then transition into the detailed explanation:
+
+
+1. **What** was done and **why** this approach was chosen over alternatives.
+2. **Underlying concepts**: design patterns, architectural principles, language features, algorithms, or conventions that are relevant.
+3. **Non-obvious details**: edge cases, gotchas, performance implications, security considerations, or common mistakes related to the change.
+4. **How it connects** to the broader codebase or to general software engineering best practices.
+
+
+### Additional rules
+
+
+1. **After completing any task**, append a clearly separated section titled `### What to learn from this` (or a contextually appropriate variant like `### Concepts behind this`, `### Deep dive`).
+
+
+2. **Adapt depth to complexity**:
+   - Trivial fix (typo, one-liner) → 2-3 sentences for the intro, 2-3 for the technical part.
+   - Medium task (new feature, refactor) → a few paragraphs covering patterns, trade-offs, and learnings.
+   - Complex task (architecture change, new system) → thorough explanation with examples, diagrams (ASCII if helpful), and references to further reading.
+
+
+3. **Use concrete examples** from the code just written — don't be abstract. Reference specific files, functions, and lines (in the technical part, not in the intro).
+
+
+4. **Highlight transferable knowledge** — things that apply beyond this project 
+
+
+5. **Never assume prior knowledge** of the specific technique used. If you use a pattern like debouncing, event delegation, or memoization — explain it from scratch, briefly but clearly. The plain-language intro is the place to build that first intuition.
+
+
+6. **If multiple approaches were considered**, explain why the chosen one won and what trade-offs the alternatives had.
