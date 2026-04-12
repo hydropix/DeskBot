@@ -56,7 +56,7 @@ class SensorReadings:
 
 
 # ── Collision detection parameters ────────────────────────────────
-COLLISION_THRESHOLD = 15.0    # m/s² — impact magnitude to trigger detection
+COLLISION_THRESHOLD = 8.0     # m/s² — impact magnitude to trigger detection
 COLLISION_HP_ALPHA = 0.95     # high-pass filter coefficient (higher = more filtering of DC)
 GRAVITY_NOMINAL = 9.81        # m/s² — expected gravity magnitude at rest
 

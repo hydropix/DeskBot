@@ -166,6 +166,23 @@ LOG_ODD_OCCUPIED_THRESHOLD = 0.5  # posterior p ≈ 0.62
 # sensor sees nothing — the unknown beyond stays at log-odds zero.
 GRID_RAY_MAX = 1.5
 
+# ── Phantom obstacle stamping (collision / stuck) ──
+# When the IMU detects an impact or the stuck watchdog fires, we inject
+# a synthetic "laser hit" right in front of the robot to materialise
+# obstacles that the rangefinders never saw (typical case: thin poles
+# the beams flew past).
+#
+# Key subtlety: the cell of an invisible pole receives a continuous
+# stream of free-updates (-0.3 / frame at 500 Hz) because the lasers
+# skim past it and hit the wall behind. A one-shot log-odds bump gets
+# erased in milliseconds. We therefore maintain a "sticky" list of
+# stamped world points with a TTL — every frame we re-force those
+# cells to LOG_ODD_MAX right after the laser update, so the stamp
+# survives long enough for the planner to see it and the mapviz to
+# render it in red.
+PHANTOM_STAMP_DIST = 0.14        # m — one cell past chassis front
+PHANTOM_STAMP_TTL  = 2.5         # seconds — how long a stamp stays sticky
+
 
 class FSMState(Enum):
     IDLE = "idle"
@@ -209,11 +226,15 @@ class OccupancyGrid:
         # World position of grid center (tracks robot).
         self.cx = 0.0
         self.cy = 0.0
+        # Sticky phantom stamps: list of (world_x, world_y, seconds_left).
+        # Stored in world frame so grid shifts don't move them.
+        self._sticky: list[tuple[float, float, float]] = []
 
     def reset(self):
         self.grid[:] = 0.0
         self.cx = 0.0
         self.cy = 0.0
+        self._sticky = []
 
     def shift(self, robot_x: float, robot_y: float):
         """Shift grid to keep robot centered. Cells that fall off are dropped."""
@@ -307,6 +328,62 @@ class OccupancyGrid:
                 if v < LOG_ODD_MIN:
                     v = LOG_ODD_MIN
             self.grid[last_ci, last_cj] = v
+
+    def stamp_obstacle_ahead(self, robot_x: float, robot_y: float,
+                             heading: float, distance: float,
+                             ttl: float):
+        """
+        Inject a phantom obstacle at ``distance`` ahead of the robot,
+        spanning two world points perpendicular to the heading.
+
+        Both points are added to the sticky list with the given TTL
+        (seconds). They are also immediately written to ``LOG_ODD_MAX``
+        so the stamp is visible in the very first frame. Persistence
+        across the laser free-update storm is handled by
+        ``enforce_sticky`` which should be called every frame.
+
+        Two points are stamped (offset by ±0.5 × GRID_RES perpendicular
+        to the heading) to cover pose uncertainty and chassis width.
+        Depending on where the center falls inside its cell, they land
+        in either one or two distinct grid cells.
+        """
+        fx = robot_x + distance * math.cos(heading)
+        fy = robot_y + distance * math.sin(heading)
+        nx = -math.sin(heading)
+        ny = math.cos(heading)
+        offset = 0.5 * GRID_RES
+        for sign in (-1.0, +1.0):
+            px = fx + sign * offset * nx
+            py = fy + sign * offset * ny
+            self._sticky.append((px, py, ttl))
+            ci, cj = self.world_to_cell(px, py)
+            if self.in_bounds(ci, cj):
+                self.grid[ci, cj] = LOG_ODD_MAX
+
+    def enforce_sticky(self, dt: float):
+        """
+        Decay TTLs and re-force LOG_ODD_MAX on every still-live sticky
+        cell. Must be called every frame AFTER the laser update so the
+        stamps survive the free-update storm from beams that skim past
+        the obstacle.
+
+        World-frame storage means grid shifts don't invalidate entries;
+        points that fall outside the current grid footprint (after the
+        robot moves away) are silently skipped by the in_bounds check
+        but remain in the list until their TTL expires.
+        """
+        if not self._sticky:
+            return
+        still_live: list[tuple[float, float, float]] = []
+        for (wx, wy, t) in self._sticky:
+            new_t = t - dt
+            if new_t <= 0.0:
+                continue
+            still_live.append((wx, wy, new_t))
+            ci, cj = self.world_to_cell(wx, wy)
+            if self.in_bounds(ci, cj):
+                self.grid[ci, cj] = LOG_ODD_MAX
+        self._sticky = still_live
 
     def is_clear_direction(self, robot_x: float, robot_y: float,
                            angle: float, distance: float) -> bool:
@@ -580,6 +657,28 @@ class Navigator:
         # ── 3. Update occupancy grid ──
         self.grid.shift(self._pos_x, self._pos_y)
         self._update_grid(rf)
+
+        # ── 3a. Phantom stamp on IMU collision ──
+        # The accelerometer-based CollisionDetector fires on any impact
+        # spike > COLLISION_THRESHOLD. We trust it only while the robot
+        # was actively commanding forward motion (otherwise we'd stamp
+        # the front on impacts felt during reverse, which would poison
+        # the map).
+        if (readings.collision_detected
+                and self._fsm != FSMState.REVERSE
+                and self._smooth_vel > 0.02):
+            print(f"[collision] mag={readings.collision_magnitude:.2f} "
+                  f"pos=({self._pos_x:+.2f},{self._pos_y:+.2f}) "
+                  f"h={math.degrees(self._heading):+.0f}°")
+            self.grid.stamp_obstacle_ahead(
+                self._pos_x, self._pos_y, self._heading,
+                PHANTOM_STAMP_DIST, PHANTOM_STAMP_TTL,
+            )
+
+        # ── 3b. Re-impose sticky stamps ──
+        # Must run AFTER _update_grid so the laser free-updates that
+        # skim past an invisible obstacle do not erase the stamp.
+        self.grid.enforce_sticky(dt)
 
         # ── 3b. Early avoidance side cache (session 10) ──
         # The cache is always stepped (even when disabled) so that the
@@ -1012,6 +1111,17 @@ class Navigator:
             self._stuck_timer += dt
 
         if self._stuck_timer > STUCK_TIME:
+            # Stuck triggers = the robot has been trying to advance for
+            # STUCK_TIME seconds without moving more than STUCK_DIST.
+            # Stamp a phantom obstacle in front BEFORE switching to
+            # REVERSE so the post-recovery planner treats the blocker
+            # as a known hazard and doesn't immediately re-approach it.
+            print(f"[stuck] pos=({self._pos_x:+.2f},{self._pos_y:+.2f}) "
+                  f"h={math.degrees(self._heading):+.0f}°")
+            self.grid.stamp_obstacle_ahead(
+                self._pos_x, self._pos_y, self._heading,
+                PHANTOM_STAMP_DIST, PHANTOM_STAMP_TTL,
+            )
             self._stuck_timer = 0.0
             self._last_progress_pos = current_pos.copy()
             self._fsm = FSMState.REVERSE

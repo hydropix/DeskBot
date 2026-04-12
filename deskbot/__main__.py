@@ -1,4 +1,4 @@
-"""Entry point: python -m deskbot [--scene ...] [--random [SEED]] [--pid]"""
+"""Entry point: python -m deskbot [--scene ...] [--random [SEED]] [--pid] [--planner ...]"""
 import argparse
 import sys
 import time
@@ -27,6 +27,10 @@ parser.add_argument(
     "--pid", action="store_true",
     help="Use legacy PID controller instead of LQR",
 )
+parser.add_argument(
+    "--planner", choices=["bug2", "astar", "field"], default="astar",
+    help="Navigation planner: bug2, astar (Bug2+A*), field (Potential Field/fluide) (default: astar)",
+)
 args = parser.parse_args()
 
 if args.random is not None:
@@ -36,6 +40,7 @@ if args.random is not None:
         n_obs=args.obstacles,
         base_seed=seed,
         use_pid=args.pid,
+        planner=args.planner,
     )
 else:
-    run(scene_name=args.scene, use_pid=args.pid)
+    run(scene_name=args.scene, use_pid=args.pid, planner=args.planner)

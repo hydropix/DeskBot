@@ -15,6 +15,7 @@ from deskbot.robot import SCENES, DEFAULT_SCENE
 from deskbot.sensors import SensorModel, RF_NAMES, RF_MAX_RANGE
 from deskbot.control import BalanceController, LQRController, StateEstimator
 from deskbot.navigation import Navigator
+from deskbot.field_nav import FieldNavigator, FieldParams
 from deskbot.localization import create_apartment_localizer
 from deskbot.gui import ControlPanel
 from deskbot.mapviz import MapFrame, extract_gt_obstacles
@@ -130,7 +131,8 @@ def _draw_rangefinders(viewer, model, data, readings):
 
 
 def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
-        use_pid: bool = False, random_gen: dict | None = None):
+        use_pid: bool = False, random_gen: dict | None = None,
+        planner: str = "astar"):
     """
     Main simulation loop.
 
@@ -140,6 +142,7 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
         use_pid: Use legacy PID controller instead of LQR.
         random_gen: If provided, regenerate obstacles on each reset.
             Dict with keys: corridor (float), n_obs (int or None), seed_counter (list[int]).
+        planner: Navigation planner - "bug2", "astar" (Bug2+A*), or "field" (Potential Field).
     """
     if scene_xml is not None:
         model = mujoco.MjModel.from_xml_string(scene_xml)
@@ -160,8 +163,25 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
     else:
         controller = LQRController(mj_model=model)
         print("  Controller: LQR (optimal)")
-    navigator = Navigator(dt, mj_model=model, use_astar=True, use_early_avoid=True)
-    print("  Planner: A* local (session 9) + early avoidance (session 10)")
+    
+    # Create navigator based on planner choice
+    if planner == "field":
+        navigator = FieldNavigator(dt=0.02, params=FieldParams(
+            k_repulse=1.0,
+            d_threshold=2.0,
+            k_attract=1.5,
+        ))
+        print("  Planner: Field Navigator (Potential Field - fluide)")
+        use_field_nav = True
+    else:
+        use_astar = (planner == "astar")
+        use_early = (planner == "astar")
+        navigator = Navigator(dt, mj_model=model, use_astar=use_astar, use_early_avoid=use_early)
+        if use_astar:
+            print("  Planner: Bug2 + A* local + early avoidance")
+        else:
+            print("  Planner: Bug2 (baseline)")
+        use_field_nav = False
 
     # Localization (WiFi + heading correction)
     if scene_name == "apartment":
@@ -173,6 +193,11 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
     commands = Commands()
     commands.navigator = navigator
     chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+    
+    # For FieldNavigator: maintain dead reckoning heading
+    field_nav_heading = 0.0
+    field_nav_x = 0.0
+    field_nav_y = 0.0
 
     # Ground-truth obstacles for map debug overlay (read once at init — the
     # navigator never sees this; it only reaches the tkinter map window).
@@ -248,6 +273,11 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
                     wifi_localizer.reset()
                 if heading_corrector:
                     heading_corrector.reset()
+                # Reset FieldNavigator DR state
+                if use_field_nav:
+                    field_nav_heading = 0.0
+                    field_nav_x = 0.0
+                    field_nav_y = 0.0
                 commands.reset_requested = False
 
             # ── Simulate one display frame (~8 physics steps at 500Hz) ──
@@ -266,24 +296,45 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
                 estimator.update(readings)
 
                 # Localization: WiFi scan + heading correction
-                if wifi_localizer is not None:
-                    scan = wifi_localizer.scan(
-                        navigator._pos_x, navigator._pos_y, dt)
-                    if scan is not None:
-                        wx, wy, conf = wifi_localizer.estimate_position(scan)
-                        # WiFi position available for future use (SLAM fusion)
+                # Note: Only works with Navigator (Bug2), not FieldNavigator
+                if not use_field_nav:
+                    if wifi_localizer is not None:
+                        scan = wifi_localizer.scan(
+                            navigator._pos_x, navigator._pos_y, dt)
+                        if scan is not None:
+                            wx, wy, conf = wifi_localizer.estimate_position(scan)
+                            # WiFi position available for future use (SLAM fusion)
 
-                if heading_corrector is not None:
-                    rf_comp = navigator.compensate_rangefinders(
-                        readings.rangefinders, estimator.pitch)
-                    correction, valid = heading_corrector.update(
-                        navigator._heading, rf_comp)
-                    # Apply small heading corrections to navigator's DR
-                    if valid:
-                        navigator._heading += correction * dt
+                    if heading_corrector is not None:
+                        rf_comp = navigator.compensate_rangefinders(
+                            readings.rangefinders, estimator.pitch)
+                        correction, valid = heading_corrector.update(
+                            navigator._heading, rf_comp)
+                        # Apply small heading corrections to navigator's DR
+                        if valid:
+                            navigator._heading += correction * dt
 
                 # Navigation AI: overrides joystick when active
-                nav_vel, nav_yaw = navigator.update(estimator, readings, dt)
+                if use_field_nav:
+                    # Update dead reckoning for FieldNavigator
+                    field_nav_heading += estimator.yaw_rate_gyro * dt
+                    field_nav_heading = math.atan2(math.sin(field_nav_heading), math.cos(field_nav_heading))
+                    field_nav_x += estimator.forward_vel * math.cos(field_nav_heading) * dt
+                    field_nav_y += estimator.forward_vel * math.sin(field_nav_heading) * dt
+                    
+                    # FieldNavigator: uses rangefinders and heading directly
+                    nav_vel, nav_yaw = navigator.update(
+                        readings.rangefinders,
+                        field_nav_heading,
+                        estimator.forward_vel
+                    )
+                    # Check if active
+                    if not navigator._active:
+                        nav_vel = None
+                else:
+                    # Navigator (Bug2/A*): uses estimator and readings
+                    nav_vel, nav_yaw = navigator.update(estimator, readings, dt)
+                
                 if nav_vel is not None:
                     cmd_vel = nav_vel
                     cmd_yaw = nav_yaw
@@ -323,22 +374,42 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
             # stays informative even when the navigator is IDLE (otherwise
             # the cached navigator._rf_compensated is empty / stale). Cost
             # is negligible: 7 sensors, cheap geometry. ──
-            rf_comp_map = navigator.compensate_rangefinders(
-                readings.rangefinders, estimator.pitch
-            )
-            commands.push_map_frame(MapFrame(
-                grid=navigator.grid.grid.copy(),
-                grid_cx=navigator.grid.cx,
-                grid_cy=navigator.grid.cy,
-                robot_x=navigator._pos_x,
-                robot_y=navigator._pos_y,
-                heading=navigator._heading,
-                target_heading=navigator._target_heading,
-                nav_active=navigator._active,
-                fsm_state=navigator._fsm.value,
-                rf_compensated=rf_comp_map,
-                gt_obstacles=gt_obstacles,
-            ))
+            if use_field_nav:
+                # FieldNavigator doesn't have grid/compensate_rangefinders
+                # Create empty grid for display
+                import numpy as np
+                from deskbot.navigation import GRID_SIZE
+                empty_grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
+                commands.push_map_frame(MapFrame(
+                    grid=empty_grid,
+                    grid_cx=field_nav_x,
+                    grid_cy=field_nav_y,
+                    robot_x=field_nav_x,
+                    robot_y=field_nav_y,
+                    heading=field_nav_heading,
+                    target_heading=navigator._target_heading,
+                    nav_active=navigator._active,
+                    fsm_state="field_nav",
+                    rf_compensated=readings.rangefinders,
+                    gt_obstacles=gt_obstacles,
+                ))
+            else:
+                rf_comp_map = navigator.compensate_rangefinders(
+                    readings.rangefinders, estimator.pitch
+                )
+                commands.push_map_frame(MapFrame(
+                    grid=navigator.grid.grid.copy(),
+                    grid_cx=navigator.grid.cx,
+                    grid_cy=navigator.grid.cy,
+                    robot_x=navigator._pos_x,
+                    robot_y=navigator._pos_y,
+                    heading=navigator._heading,
+                    target_heading=navigator._target_heading,
+                    nav_active=navigator._active,
+                    fsm_state=navigator._fsm.value,
+                    rf_compensated=rf_comp_map,
+                    gt_obstacles=gt_obstacles,
+                ))
 
             # ── Draw rangefinder beams ──
             _draw_rangefinders(viewer, model, data, readings)
@@ -361,7 +432,8 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
 
 
 def run_random_loop(corridor: float = 1.5, n_obs: int | None = None,
-                    base_seed: int = 0, use_pid: bool = False):
+                    base_seed: int = 0, use_pid: bool = False,
+                    planner: str = "astar"):
     """
     Run the simulator in a loop, generating a new random terrain on each reset.
     """
@@ -380,7 +452,7 @@ def run_random_loop(corridor: float = 1.5, n_obs: int | None = None,
 
         xml = generate_scene_xml(obstacles, corridor)
         random_gen = {"corridor": corridor, "n_obs": n_obs}
-        result = run(scene_xml=xml, use_pid=use_pid, random_gen=random_gen)
+        result = run(scene_xml=xml, use_pid=use_pid, random_gen=random_gen, planner=planner)
 
         if result != "reload":
             break  # user closed the window with ESC
