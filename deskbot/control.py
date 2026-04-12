@@ -28,7 +28,8 @@ class StateEstimator:
         self.alpha = alpha
         self.pitch = 0.0
         self.pitch_rate = 0.0
-        self.yaw_rate = 0.0
+        self.yaw_rate = 0.0        # from encoder differential — used by LQR/PID
+        self.yaw_rate_gyro = 0.0   # from gyro_z — used by navigator DR
         self.forward_vel = 0.0
         self.fallen = False
         self._initialized = False
@@ -37,6 +38,7 @@ class StateEstimator:
         self.pitch = 0.0
         self.pitch_rate = 0.0
         self.yaw_rate = 0.0
+        self.yaw_rate_gyro = 0.0
         self.forward_vel = 0.0
         self.fallen = False
         self._initialized = False
@@ -57,7 +59,27 @@ class StateEstimator:
         vel_left = s.encoder_left * WHEEL_RADIUS
         vel_right = s.encoder_right * WHEEL_RADIUS
         self.forward_vel = (vel_left + vel_right) / 2.0 + self.pitch_rate * WHEEL_RADIUS
+
+        # Two yaw-rate estimates, each used in a different place:
+        #
+        #  - self.yaw_rate (encoder differential): used as feedback by
+        #    the balance controller (LQR Q/R was tuned against this). It
+        #    represents the *commanded* wheel rotation and is what the
+        #    controller's linearized model assumes. Do NOT change the
+        #    source here without re-tuning the LQR gains — a mismatch
+        #    between the feedback noise character and Q/R makes the
+        #    robot fall within a few seconds (verified empirically).
+        #
+        #  - self.yaw_rate_gyro (raw gyro_z): used by Navigator for
+        #    dead-reckoning heading integration. Gyro measures chassis
+        #    rotation directly and is immune to the wheel slip that
+        #    corrupts encoder-based yaw during contour maneuvers.
+        #    Measured on 7 random seeds (diag_yaw_sources.py):
+        #        encoder yaw integration error = 13.5° mean
+        #        gyro    yaw integration error =  8.1° mean
+        #    Gyro has residual bias drift (~0.5°/s) but no slip error.
         self.yaw_rate = (vel_right - vel_left) / WHEEL_SEPARATION
+        self.yaw_rate_gyro = s.gyro[2]
 
         self.fallen = abs(self.pitch) > math.radians(40)
 

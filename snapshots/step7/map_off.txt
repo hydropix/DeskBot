@@ -1,0 +1,31 @@
+=================================================================
+  MAPPING QUALITY BENCHMARK
+  15 episodes, corridor=3.0m, 2-5 obstacles, seed=42
+  Snapshots dir: C:\Users\Bruno\Documents\GitHub\DeskBot\snapshots
+=================================================================
+  ep= 0 seed= 42 [OK  ] x= 6.80 obs=4 IoU=0.308 P=0.320 R=0.895 TP=  77 FP= 164 FN=  9
+  ep= 1 seed= 43 [OK  ] x= 3.84 obs=8 IoU=0.558 P=0.595 R=0.900 TP=  72 FP=  49 FN=  8
+  ep= 2 seed= 44 [OK  ] x= 5.71 obs=7 IoU=0.468 P=0.481 R=0.945 TP=  52 FP=  56 FN=  3
+  ep= 3 seed= 45 [OK  ] x= 2.84 obs=5 IoU=0.424 P=0.424 R=1.000 TP= 103 FP= 140 FN=  0
+  ep= 4 seed= 46 [OK  ] x= 3.12 obs=6 IoU=0.233 P=0.251 R=0.764 TP=  55 FP= 164 FN= 17
+  ep= 5 seed= 47 [OK  ] x= 5.71 obs=5 IoU=0.381 P=0.386 R=0.972 TP= 103 FP= 164 FN=  3
+  ep= 6 seed= 48 [OK  ] x= 3.86 obs=4 IoU=0.434 P=0.484 R=0.805 TP=  62 FP=  66 FN= 15
+  ep= 7 seed= 49 [OK  ] x= 2.10 obs=4 IoU=0.373 P=0.376 R=0.984 TP=  62 FP= 103 FN=  1
+  ep= 8 seed= 50 [OK  ] x= 6.31 obs=8 IoU=0.355 P=0.389 R=0.803 TP=  49 FP=  77 FN= 12
+  ep= 9 seed= 51 [OK  ] x= 5.95 obs=5 IoU=0.348 P=0.354 R=0.958 TP=  92 FP= 168 FN=  4
+  ep=10 seed= 52 [OK  ] x= 5.89 obs=8 IoU=0.370 P=0.383 R=0.916 TP=  87 FP= 140 FN=  8
+  ep=11 seed= 53 [OK  ] x= 4.62 obs=7 IoU=0.349 P=0.361 R=0.912 TP=  52 FP=  92 FN=  5
+  ep=12 seed= 54 [OK  ] x= 6.36 obs=6 IoU=0.370 P=0.371 R=0.991 TP= 105 FP= 178 FN=  1
+  ep=13 seed= 55 [OK  ] x= 5.03 obs=6 IoU=0.438 P=0.444 R=0.970 TP=  64 FP=  80 FN=  2
+  ep=14 seed= 56 [OK  ] x= 6.18 obs=5 IoU=0.302 P=0.302 R=1.000 TP=  26 FP=  60 FN=  0
+
+=================================================================
+  AGGREGATED (15 eps with data)
+  IoU        : 0.372
+  Precision  : 0.384
+  Recall     : 0.923
+  FP density : 0.0821 (phantoms per observed cell)
+  Totals     : TP=1061 FP=1701 FN=88 TN=17828
+  Wall time  : 54.0s (0.3 ep/s)
+=================================================================
+

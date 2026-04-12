@@ -197,6 +197,9 @@ def run_episode(
     seed: int = 0,
     n_obstacles: int = 0,
     verbose: bool = False,
+    planner: str = "bug2",
+    early_avoid: bool = False,
+    early_k: float | None = None,
 ) -> EpisodeResult:
     """Run one navigation episode with a generated scene."""
     model = mujoco.MjModel.from_xml_string(scene_xml)
@@ -209,7 +212,11 @@ def run_episode(
     sensor_model = SensorModel(model, dt)
     estimator = StateEstimator(dt)
     controller = BalanceController()
-    navigator = Navigator(dt, mj_model=model)
+    navigator = Navigator(
+        dt, mj_model=model, use_astar=(planner == "astar"),
+        use_early_avoid=early_avoid,
+        early_k=early_k,
+    )
 
     # Warmup
     for _ in range(int(1.0 / dt)):
@@ -300,6 +307,9 @@ def _worker(job: dict) -> tuple[int, EpisodeResult]:
     min_obs = job["min_obs"]
     max_obs = job["max_obs"]
     duration = job["duration"]
+    planner = job.get("planner", "bug2")
+    early_avoid = job.get("early_avoid", False)
+    early_k = job.get("early_k", None)
 
     rng = np.random.default_rng(ep_seed)
     n_obs = int(rng.integers(min_obs, max_obs + 1))
@@ -313,6 +323,9 @@ def _worker(job: dict) -> tuple[int, EpisodeResult]:
         seed=ep_seed,
         n_obstacles=len(obstacles),
         verbose=False,
+        planner=planner,
+        early_avoid=early_avoid,
+        early_k=early_k,
     )
     return ep, result
 
@@ -328,6 +341,24 @@ def main():
                         help="Corridor half-width in meters (default: 1.5)")
     parser.add_argument("--min-obs", type=int, default=2)
     parser.add_argument("--max-obs", type=int, default=5)
+    parser.add_argument(
+        "--planner", choices=["bug2", "astar"], default="bug2",
+        help="Contour-entry planner. bug2 = legacy virtual scan (default); "
+             "astar = A* on the inflated occupancy grid with silent "
+             "fallback to bug2 on timeout/failure.",
+    )
+    parser.add_argument(
+        "--early-avoid", choices=["off", "on"], default="off",
+        help="Early avoidance (session 10). off = legacy behaviour "
+             "(default); on = add continuous inverse-distance yaw bias "
+             "in GO_HEADING before SAFE_DIST trigger.",
+    )
+    parser.add_argument(
+        "--early-k", type=float, default=None,
+        help="Override the early avoidance gain k (default from "
+             "EarlyAvoidanceParams). Only used when --early-avoid on. "
+             "Step 6 sweep values: 0.05, 0.08, 0.12.",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1),
@@ -344,6 +375,8 @@ def main():
     print("  RANDOMIZED NAVIGATION BENCHMARK")
     print(f"  {args.episodes} episodes, corridor={chw*2:.1f}m wide, "
           f"{args.min_obs}-{args.max_obs} obstacles, seed={base_seed}")
+    print(f"  Planner: {args.planner}")
+    print(f"  Early avoid: {args.early_avoid}")
     print(f"  Parallel workers: {args.jobs}")
     print("=" * 65)
     print()
@@ -372,6 +405,9 @@ def main():
             "min_obs": args.min_obs,
             "max_obs": args.max_obs,
             "duration": args.duration,
+            "planner": args.planner,
+            "early_avoid": (args.early_avoid == "on"),
+            "early_k": args.early_k,
         }
         for ep in range(args.episodes)
     ]
@@ -399,6 +435,9 @@ def main():
                 seed=ep_seed,
                 n_obstacles=len(obstacles),
                 verbose=args.verbose,
+                planner=args.planner,
+                early_avoid=(args.early_avoid == "on"),
+                early_k=args.early_k,
             )
             results.append(result)
             if not args.verbose:

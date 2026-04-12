@@ -325,6 +325,137 @@ Implemented the 5 features from memory notes. Debugged LQR through empirical sig
 
 ---
 
+## Session 9 -- 2026-04-12 : A* Local Planner as Bug2 Contour Helper
+
+### Context
+
+Session 8 ended with Bug2 v2 restored at 82 % after the DWA/TEB double failure. The post-mortem (`docs/teb_evaluation.md`) identified that Bug2's ~22 % of wall-gap failures come from its virtual scan being too short-sighted: 13 discrete rays cannot reason about a two-step detour. Bruno and Claude wrote `docs/plan_astar_local.md` proposing a classical A\* on the existing occupancy grid as a *helper* for the CONTOUR entry -- not a replacement for Bug2. The plan explicitly forbade touching the FSM, the pitch filter, or adding any reactive layer. Every step had a gate and a fallback.
+
+### What was done
+
+1. **`deskbot/astar_local.py` (new)** -- standalone 8-connected A\* with:
+   - Octile heuristic (admissible for uniform 8-conn grids).
+   - Chebyshev dilation of the log-odds mask by `INFLATE_CELLS = 2` (~16 cm, robot half-width 13 cm + 5 cm margin at 8 cm/cell).
+   - No-corner-cutting rule: diagonal step requires both axial shoulder cells to be free.
+   - Hard budget `max_iterations = 2000`, tie-breaker counter so the heap never compares tuples.
+   - Helpers `nearest_free_cell` (Chebyshev-ring BFS to nudge a blocked start/goal) and `path_initial_tangent` (average direction over the first N cells).
+   - Full mathematical specification in the module docstring (frames, cost, heuristic, complexity).
+2. **`scripts/test_astar_local.py` (new)** -- 7 synthetic tests: empty grid straight line, wall with gap, gap closed by inflation, goal nudging, tangent sign around an asymmetric wall, budget timeout, full seal (no path). All pass.
+3. **`deskbot/navigation.py`** -- minimal surgical changes:
+   - New `use_astar` constructor flag (default False, preserves Bug2).
+   - `_enter_contour` extracted into two helpers: `_contour_side_from_virtual_scan` (the legacy code, untouched) and `_contour_side_from_astar` (new). A\* builds its own `AStarPlanner` over `self.grid.grid`, plans from the robot's cell to a cell `LOCAL_HORIZON = 1.5 m` ahead along the target heading, nudges both endpoints out of inflated obstacles, then derives the contour side from the path tangent. On failure the function returns None and the caller silently falls back to the virtual scan.
+   - Nothing else moved: FSM states, transitions, watchdogs, pitch filter, wall-follow controller are all byte-identical to session 8.
+4. **`scripts/benchmark_random.py`** -- added `--planner {bug2,astar}` flag (default `bug2`), threaded into `run_episode` and both worker paths.
+5. **`scripts/eval_mapping.py`** -- same `--planner` flag for the sanity check in step 7.
+6. **`docs/benchmark_astar_v1.txt` (new)** -- full raw benchmark numbers, gate checklist, parameters.
+
+### Step-by-step results
+
+Each step had its own gate; the plan said to stop if A\* regressed by more than 5 points or if I was tempted to add a rustine.
+
+- **Step 1 (A\* + unit tests)**. First draft had three bugs surfaced by the tests: an overly ambitious "narrow passage" test that actually expected no-path, a start cell inside its own inflation in the tangent test, and an ill-sealed no-path test. All three were fixture bugs, not planner bugs, and all tests pass after fixing them.
+- **Step 2 (start/goal selection)**. Implemented as `nearest_free_cell` helper. Covered by the "goal nudged" test.
+- **Step 3 (integration)**. Added `_contour_side_from_astar`. The threshold for side selection is ±10° off the heading; ambiguous tangents fall through to the sensor-biased virtual scan, preserving the existing tie-break logic.
+- **Step 4 (A/B at 50 episodes, seed 42)**. First run with `path_initial_tangent(look_ahead=4)` regressed by 4 pts (82 % vs 86 %). Diagnosis: 4 cells = 32 cm is too short on an 8-connected staircase; a single diagonal near the start can flip the measured tangent and commit the wall-follower to the wrong side. Doubled the look-ahead to 10 cells (~80 cm). New result: **A\* 90 % vs Bug2 86 %** over 3 × 50 eps; **gate passed (+4 pts)**.
+- **Step 5 (periodic replanning)**. **SKIPPED by design**. The plan allowed step 5 only as an enhancement once step 4 gate was met. A\* was already net positive without it; the plan's own red-line rule is "never rewrite validated nav"; adding replanning would have re-entered the territory of biasing the wall-follow P-controller -- exactly what broke TEB in session 8. Stayed with single-shot A\* at contour entry.
+- **Step 6 (final benchmark, 100 eps × 3 runs seed 42)**. Bug2 mean 84.0 % (80/87/85), A\* mean **89.0 % (86/91/90)**, delta **+5 pts**, zero falls in every run, A\* variance (σ 2.6) tighter than Bug2 (σ 3.6). Run-to-run jitter comes from `SensorModel` not reseeding per episode -- noted as follow-up but out of scope.
+- **Step 7 (mapping sanity check, `eval_mapping.py --episodes 15`)**. Aggregate IoU 0.380 (A\*) vs 0.384 (Bug2), -0.4 pt, inside the ±1 pt gate. A\* actually improves precision (0.399 vs 0.395) and lowers FP density (0.0796 vs 0.0841); recall drops 4 pts because A\*'s route hits a slightly smaller fraction of the GT surfaces in 15 s.
+
+### What worked
+
+- **Treating A\* as a helper, not a replacement.** The whole integration is one new method plus a flag. Bug2's FSM, watchdogs, and virtual scan are byte-identical. If A\* ever returns None (budget exceeded, start or goal blocked, tangent too ambiguous), the robot keeps its session-8 behavior. Zero regression surface.
+- **Octile heuristic and binary inflation.** Admissible heuristic → optimal paths; binary inflation → debuggable. No ad-hoc continuous cost on obstacle proximity (the plan explicitly forbade it, and in hindsight it would have muddied the tangent direction signal).
+- **Writing unit tests before benchmark.** The 4 → 10 cell look-ahead bug would have been painful to chase from benchmark numbers alone. The `test_tangent_choice_around_left_wall` test would have caught the wrong answer directly if I had wired it to compare magnitudes -- adding that to the test suite is low-hanging fruit.
+- **Multiple runs per planner to characterize variance.** Running 3 × 50 episodes revealed that bug2 varies across 82-90 % on the same seed (because sensor noise is unseeded). A single-run gate would have been misleading.
+
+### What failed / lessons learned
+
+- **First look-ahead of 4 cells was wrong, and I would have missed it without the benchmark.** The planner was mathematically correct; the side-decision logic was not robust to the 8-conn staircase artefact. On a diagonal staircase the first segment can point 45° off from the bulk direction. 10 cells averages that out. **Transferable rule**: any "initial direction" extraction from a discrete grid path should integrate over a length that is large compared to the step size but small compared to the full plan.
+- **Run-to-run variance is ±6 pts on 50 eps and ±3 pts on 100 eps** because `SensorModel` uses the process-global numpy RNG. Both planners see the same noise so A/B comparisons are valid, but absolute rates jitter. Follow-up: thread an `ep_seed`-derived RNG into `SensorModel` so benchmark results are reproducible.
+- **The "murs vs hors-murs" split from the plan was not implemented.** The benchmark does not tag episodes by dominant obstacle type; adding it would have required a benchmark refactor outside the planner change. The global rate is comfortably above the gate and falls are zero, so I accepted that gap and documented it in `docs/benchmark_astar_v1.txt`. If a future session needs the split, a single field on `EpisodeResult` would suffice.
+- **SKIP decision for step 5 is worth capturing**: periodic replanning was an *optional* plan step, conditional on the rest working. The rest *did* work at single-shot. Taking the step anyway would have been *gratuitous complexity*, exactly the anti-pattern session 8 warned about. This is the first time in this project that I stopped at "good enough" instead of chasing the next optimization; it felt uncomfortable, and the plan's explicit "stop if tempted to touch the FSM" rule is what anchored the decision.
+
+### Claude's role
+
+Read `docs/plan_astar_local.md`, `docs/teb_evaluation.md`, and the relevant parts of `deskbot/navigation.py`. Implemented the module, the tests, the integration, and the benchmark wiring. Hit and diagnosed the 4-cell look-ahead regression through the A/B gate rather than by guessing. Chose to skip step 5 rather than add optional complexity. The whole session was a straightforward plan execution with one surprise (look-ahead) that was caught by the gate as designed.
+
+### Session 9 final state
+
+- `deskbot/astar_local.py` (new, ~230 LOC) with 7 passing unit tests.
+- `deskbot/navigation.py` gains `use_astar` flag and two small helper methods. Default remains `bug2`.
+- `scripts/benchmark_random.py` and `scripts/eval_mapping.py` gain `--planner`.
+- A\* score: **89 % global success @ 100 eps × 3 runs, 0 falls**, vs Bug2 **84 %** on the same conditions. Mapping IoU essentially unchanged (−0.4 pt, inside gate).
+- Bug2 stays the *default planner* until a user opts in with `--planner astar`, pending a broader validation run on other seeds.
+
+---
+
+## Session 10 -- 2026-04-12 : Early Avoidance -- Nav Wins, Mapping Loses
+
+### Context
+
+Session 9 closed with Bug2 + A* at 89 % on 100 random episodes, 0 falls, and the `_contour_side_from_astar` helper only consulted once the robot crossed SAFE_DIST = 0.36 m. The remaining ~11 % of failures came from two patterns: tight chicanes where CONTOUR pivoted late, and narrow-gap walls where a two-step detour was needed. Bruno and Claude wrote `docs/plan_early_avoidance.md` proposing a *continuous* yaw bias in GO_HEADING, proportional to the inverse of the frontal distance, applied *before* the SAFE_DIST trigger. The intuition was that a tiny bias (a few deg/s at 2 m) integrated over ~2 m of approach would bend the trajectory by ~15-25 degrees and steer past the obstacle without ever engaging CONTOUR. The plan also expected the continuous rotation to sweep the FC ray laterally and densify the grid -- a free mapping boost on the side.
+
+### What was done
+
+1. **`deskbot/early_avoidance.py` (new)** -- pure, stateless guidance law plus a `EarlySideCache` dataclass and a tick-level `update_side_cache` helper. All five constants (`k`, `d_sat`, `d_trig`, `d_cut`, `t_hold`, `t_clear`) documented with physical justification in the module docstring. No new dependency.
+2. **`scripts/test_early_avoidance.py` (7 unit tests)** on the pure law: cutoff, saturation, trigger handoff, sign, monotonicity. All pass.
+3. **`scripts/test_early_side_state.py` (8 unit tests)** on the side cache state machine: FSM gating, hold hysteresis, clear dwell, intermittent noise, handoff below `d_trig`. All pass.
+4. **`deskbot/navigation.py`** -- surgical additions:
+   - Constructor flag `use_early_avoid` + optional `early_k` override for the step 6 sweep.
+   - `_update_early_side(rf, dt)` called once per tick after the occupancy-grid update.
+   - `_early_side_picker(rf)` (new direct-rangefinder selector -- see "What failed").
+   - One additive term in `_state_go_heading`, gated by `self._use_early_avoid and self._early_cache.side is not None`. All existing Bug2 + A* code paths are byte-identical when the flag is off.
+5. **`scripts/benchmark_random.py`, `scripts/eval_mapping.py`** -- both gain `--early-avoid {off,on}`; the random benchmark also gains `--early-k FLOAT` for the sweep. Defaults `off`.
+6. **`scripts/benchmark_chicanes.py` (new)** -- chicane-only variant of the random benchmark for step 5.
+7. **`scripts/diag_early_avoid.py` (new)** -- per-tick debug tracer used to diagnose the side-selector bug described below.
+8. **`docs/benchmark_early_avoid_v1.txt` (new)** -- full raw numbers for every gate.
+
+### Step-by-step results
+
+- **Step 0 (flag-neutral baseline)**. Three runs of `--planner astar` without the flag (87/87/88 %, mean 87.3) and three with `--early-avoid off` (88/88/90, mean 88.7). Delta +1.4 pts within the documented ±3-5 pt SensorModel-noise variance. Gate passed.
+- **Step 1 (pure law)**. 7/7 unit tests pass at first try.
+- **Step 2 (cache state machine)**. 8/8 tests pass. Hysteresis + clear dwell behave as specified.
+- **Step 3 (smoke run)**. First 3-episode smoke run was terrible: 1/3 success, 14+ contours on the successful episode (3× baseline), 2 failures. The plan's fallback clause said "stop and diagnose". I did.
+- **Diagnosis (session 10's surprise).** `scripts/diag_early_avoid.py` traced seed 42 tick by tick and revealed that `_contour_side_from_virtual_scan` returns *systematically* the same side (-1) at long range for two compounding reasons:
+  1. `OccupancyGrid.clearance_in_direction` walks at most `GRID_RAY_MAX = 1.5 m`, and discretized ray cells miss any obstacle beyond ~1.44 m. So at 1.5-2.0 m *all 13 scan directions* tie at max clearance, collapsing to the straight-ahead tie-breaker.
+  2. The tie-breaker uses `fl - fr` with undetected rays (`-1`) coerced to `0 m`. A grazing detection on FL plus no detection on FR then reads as "left has obstacle at 1.7 m, right has obstacle at 0 m -- right is CLOSER", so the code returns "go left" -- into the obstacle.
+
+   On seed 42 the obstacle box was at y=+0.52, exactly to the left of the robot's path. The biased trajectory pushed the robot straight into it. Classic sign/convention inversion hidden by a subtle boundary condition in a validated helper.
+- **Step 3 fix (formulation change, not a rustine)**. Added `_early_side_picker(rf)` -- a direct-rangefinder selector that weighs `rf_FL/FL2` vs `rf_FR/FR2` by inverse distance, treats undetected rays as *no information* (weight 0), and returns **None** when there is no asymmetry. The guarantee: early avoidance only picks a side when it has actual evidence. If the only thing visible is `rf_FC` (narrow obstacle straight ahead), the cache stays unlocked, no bias is applied, and the robot continues on its straight path until CONTOUR takes over. This respects the plan's "correct the formulation, don't add a rustine" rule: `_contour_side_from_virtual_scan` is *not touched*, it's simply bypassed by early avoidance in favour of a more honest-at-long-range selector. Re-running the seed 42 diag confirmed: the robot curves smoothly right around obstacle 1, then again around obstacle 2, with zero contour entries in 12 sim-seconds.
+- **Step 4 (real A/B benchmark, 3 × 100 eps per configuration)**. Seed 42: off 88/88/90 → on 90/91/91 (+2.0 pts mean). Seed 43: off 85/85/86 → on 92/93/91 (+6.7 pts mean). Zero falls in all 12 runs (1200 episodes). Stuck recoveries down 20-30 %. Gate passed cleanly on both seeds.
+- **Step 5 (chicane-only benchmark)**. 30 forced chicane scenes at seed 1000. Off: 29/30 with avg 2.2 contours. On: 30/30 with avg 1.1 contours. The single `off` failure was absorbed by early avoidance steering the robot past the first box with a better alignment for the second. Gate passed.
+- **Step 6 (k sweep, 3 × 100 eps at seed 42)**. k=0.05 mean 91.7, k=0.08 mean 90.7, k=0.12 mean 92.3. All three pass ≥ 89 %, zero falls everywhere. The gaps between means (max 1.6 pts) are inside the inter-run variance (σ 2.4-2.5 pts for k=0.05/0.12, σ 0.5 for k=0.08). Retained **k = 0.08** because it is the only value also validated at seed 43 (from step 4) and because it has the lowest run-to-run sigma. A wider validation at seed 43 for the other k values would have needed another 24 min of compute to beat the noise floor.
+- **Step 7 (mapping eval, 15 eps at seed 42)**. This is where the story turns. IoU 0.372 → 0.327 (**-0.045**, gate was -0.010). Recall 0.923 → 0.856 (**-0.067**, gate wanted +0.020). Precision 0.384 → 0.346. FP density 0.0821 → 0.0882. Early avoidance *regresses* the grid quality by more than 2 IoU points -- the plan's explicit stopping criterion. Per-episode deltas: 6 improved, 9 worsened; one severe outlier (seed 47, IoU 0.103 vs 0.381 off), but the mean regression holds even without it.
+
+### What worked
+
+- **Diagnosing before patching.** 3-episode smoke result (14 contours vs baseline 5) was a clear red flag. Instead of tuning `k` down or inventing a safety layer, I built `diag_early_avoid.py` with a tick-level trace and *watched* a single seed. Found the exact double-bug in `_contour_side_from_virtual_scan` in ten minutes. The plan's explicit "5 interdictions" kept me honest: no reactive filter, no safety layer, no FSM touch.
+- **The honest-information selector.** `_early_side_picker` returns `None` when the picker has nothing to go on. That `None` result propagates naturally through `update_side_cache` into "no bias", which means the system degrades gracefully to plain Bug2 whenever the long-range info is ambiguous. A wrong decision at 1.8 m compounds over a whole approach; no decision is strictly better.
+- **Cache hysteresis with an escape.** `T_hold` keeps the bias stable on near-symmetric obstacles (session 8 taught that oscillating side choices cause massive damage). `T_clear` lets the cache forget a past obstacle once the robot has cleared it, so the next chicane gets a fresh decision. Chicane benchmark (+1 seed, avg contours halved) is the visible payoff of that balance.
+- **Parameterising `k` through `dataclasses.replace`.** Adding `--early-k FLOAT` to the benchmark threaded through `Navigator.early_k` into a one-off `EarlyAvoidanceParams` instance via `dataclasses.replace` -- 6 lines total, no module-level mutation, no monkey-patch, fully compatible with the `ProcessPoolExecutor` workers.
+
+### What failed / lessons learned
+
+- **The plan's mapping theory did not survive contact with reality.** The expected "continuous rotation sweeps the FC ray sideways, densifies the grid" was wrong on two counts. (i) The retained bias k=0.08 peaks at 0.16 rad/s -- roughly 2-3° of body-yaw deviation over a typical approach, not enough to meaningfully re-aim FC. (ii) Eliminating CONTOUR events is exactly what removes the main source of *wide-angle* grid updates: CONTOUR wall-follows sweep the side lasers across an obstacle's entire extent. Fewer contours = fewer viewpoints = lower recall. Navigation and mapping are in tension, not synergy, and early avoidance buys nav success at the cost of mapping fidelity. The theory ignored that the grid's recall budget was being funded by contour events, not by straight-line cruising.
+- **Signature bug in a session-9 helper, surfaced in a regime where session 9 never operated.** `_contour_side_from_virtual_scan` treats undetected `-1` rays as `fr_val = 0 m` in its tie-break. At close range (SAFE_DIST) both FL and FR usually see the obstacle, so the bug is invisible. At 1.5-2.0 m, only one side sees the obstacle and the bug inverts the answer. Session 9's A* version did not exercise the long-range regime either. The lesson: a helper is only validated *within the regime it was tested in*. Re-using it in a new regime (early avoidance's 1-2 m range) re-exposes hidden assumptions.
+- **Choice between k=0.08 and k=0.12 is noise.** On seed 42 alone, k=0.12 scores higher mean (+1.6 pts) but with 4× the inter-run sigma. Picking k=0.12 to "squeeze out the last point" would have been sweep-hacking: a 1.6-pt difference on three runs is indistinguishable from the 3-5 pt SensorModel variance. The rational call was k=0.08 because it is also validated on seed 43 and has the tightest distribution. This was the harder call of the session because the mean comparison was psychologically tempting.
+- **Pedagogical moment on sign conventions.** The plan's literal formula `ω_bias = k · side · 1/D` expects `side = +1` → positive yaw → turn left. But `_contour_side_from_virtual_scan` uses the opposite convention (`+1` = "obstacle on left, go right" = negative yaw). Resolved by documenting the convention explicitly in `compute_bias_yaw` and negating once in `_update_early_side` via `-contour_side`. Then the bug above forced me to replace the selector entirely, but the resolution pattern -- "keep the pure law in one convention, negate at the integration boundary once with a comment" -- is the cleanest way to handle sign mismatches without polluting either side.
+
+### Claude's role
+
+Read `docs/plan_early_avoidance.md` end to end before touching code. Built the pure law + its tests before integration. Hit the 14-contour smoke regression, resisted the temptation to tune `k` down, built a tick-level diagnostic, found the dual root cause in 10 minutes, and replaced *only* the side selector -- not any watchdog, not `_state_contour`, not the pitch filter, not the LQR. All four of the plan's absolute "do not touch" lines were respected. When the mapping gate failed at step 7, did not retry with a bigger k or a wider margin; documented the regression honestly and kept the flag `off` by default per the plan's fallback clause.
+
+### Session 10 final state
+
+- `deskbot/early_avoidance.py` (new, ~160 LOC) with 7 + 8 = 15 passing unit tests.
+- `deskbot/navigation.py` gains a side picker, a cache updater, a one-line additive bias in `_state_go_heading`, and a `use_early_avoid` constructor flag (~80 LOC added, zero existing lines modified in the already-validated paths).
+- `scripts/benchmark_random.py`, `scripts/benchmark_chicanes.py` (new), `scripts/eval_mapping.py`, `scripts/diag_early_avoid.py` (new), `scripts/test_early_avoidance.py` (new), `scripts/test_early_side_state.py` (new).
+- Navigation success: **seed 42 88.7 → 90.7 (+2.0)**, **seed 43 85.3 → 92.0 (+6.7)**, **chicanes 97 → 100**, **0 falls across 1200 + 60 + 600 + ~450 episodes**, contours -12 %, stuck recoveries -28 %.
+- Mapping: **IoU 0.372 → 0.327 (-0.045)**, **recall 0.923 → 0.856 (-0.067)**. Mapping gate fails.
+- Default remains `--early-avoid off` (Bug2 + A* from session 9). Feature ships as opt-in. A future session could explore either raising `k` enough to produce real angular sweep (stability TBD) or re-introducing a targeted CONTOUR-alike sweep whenever the robot enters the 0.6-1.2 m range, but neither is in scope for this session.
+
+---
+
 ## Roadmap (as of 2026-04-12)
 
 ### Completed
@@ -345,6 +476,8 @@ Implemented the 5 features from memory notes. Debugged LQR through empirical sig
 14. LQR optimal controller (replaces cascaded PID + 7 workarounds)
 15. DWA local planner (replaces Bug2 FSM, 315 trajectory samples at 20 Hz)
 16. WiFi RSSI localization + wall-geometry heading correction
+17. A\* local planner as Bug2 CONTOUR helper (opt-in, +5 pts over Bug2 on 100 eps)
+18. Early avoidance guidance law (opt-in, +2/+7 pts over A\* on seed 42/43, 100 % on chicanes, but mapping IoU regresses -4.5 pts so it stays opt-in)
 
 ### Next priorities
 

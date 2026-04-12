@@ -1,0 +1,25 @@
+>> [ 99/100] ep= 94 [FAIL] X=  8.4 Y= -1.2 t= 60.0s obs=5 cont=15 stuck=7 spd=0.22 seed=136
+   [100/100] ep= 98 [OK  ] X= 12.0 Y= -1.1 t= 55.6s obs=5 cont=11 stuck=2 spd=0.26 seed=140
+
+=================================================================
+  SUCCESS RATE:    91/100 (91%)
+  Falls:           0
+  Stuck episodes:  25
+  Avg contours:    4.8
+  Avg speed:       0.37 m/s
+  Avg time (pass): 36.2s
+  Avg |Y| dev:     0.71m
+  Wall time:       237.5s (0.4 ep/s)
+=================================================================
+
+  FAILURE SEEDS (reproduce with --seed N --episodes 1 --verbose):
+    seed=44 [FAIL] X=6.8 obs=5 stuck=8
+    seed=65 [FAIL] X=2.7 obs=3 stuck=13
+    seed=73 [FAIL] X=8.8 obs=5 stuck=9
+    seed=79 [FAIL] X=6.2 obs=2 stuck=8
+    seed=85 [FAIL] X=10.0 obs=5 stuck=8
+    seed=107 [FAIL] X=10.4 obs=3 stuck=8
+    seed=119 [FAIL] X=9.0 obs=4 stuck=5
+    seed=122 [FAIL] X=10.2 obs=5 stuck=0
+    seed=136 [FAIL] X=8.4 obs=5 stuck=7
+

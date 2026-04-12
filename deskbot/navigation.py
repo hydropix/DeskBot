@@ -25,6 +25,20 @@ from dataclasses import dataclass
 
 from deskbot.robot import WHEEL_RADIUS, WHEEL_SEPARATION
 from deskbot.perception import GroundGeometry
+from deskbot.astar_local import (
+    AStarPlanner,
+    LOCAL_HORIZON as ASTAR_LOCAL_HORIZON,
+    GOAL_SEARCH_RADIUS,
+    INFLATE_CELLS,
+    nearest_free_cell,
+    path_initial_tangent,
+)
+from deskbot.early_avoidance import (
+    EARLY_PARAMS,
+    EarlySideCache,
+    compute_bias_yaw,
+    update_side_cache,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -341,11 +355,21 @@ class Navigator:
     avoiding obstacles by contouring around them.
     """
 
-    def __init__(self, dt: float, mj_model):
+    def __init__(self, dt: float, mj_model, use_astar: bool = False,
+                 use_early_avoid: bool = False,
+                 early_k: float | None = None):
         """
         `mj_model` is REQUIRED. The navigator depends on GroundGeometry
         for exact pitch compensation; the legacy scalar fallback has been
         removed. Pass the compiled MuJoCo model used by the simulator.
+
+        `use_astar`: if True, the CONTOUR-entry scan is replaced by an
+        A* plan on the inflated occupancy grid. On timeout or planning
+        failure the original virtual scan is used as a silent fallback.
+
+        `use_early_avoid`: if True, adds a continuous inverse-distance
+        yaw bias in GO_HEADING (session 10 early avoidance). Off by
+        default; see deskbot/early_avoidance.py for the guidance law.
         """
         if mj_model is None:
             raise ValueError(
@@ -356,6 +380,22 @@ class Navigator:
         self.state = NavState()
         self.grid = OccupancyGrid()
         self._ground = GroundGeometry(mj_model)
+        self._use_astar = bool(use_astar)
+        self._astar_path: list[tuple[int, int]] | None = None
+        self._astar_last_reason: str = ""
+
+        # Early avoidance (session 10). Off by default, only consulted
+        # by _state_go_heading when self._use_early_avoid is True.
+        # `early_k` overrides only the gain constant, for step-6
+        # tuning sweeps. All other params stay at their documented
+        # defaults (see early_avoidance.EarlyAvoidanceParams).
+        self._use_early_avoid = bool(use_early_avoid)
+        self._early_cache = EarlySideCache()
+        if early_k is None:
+            self._early_params = EARLY_PARAMS
+        else:
+            from dataclasses import replace
+            self._early_params = replace(EARLY_PARAMS, k=float(early_k))
 
         # Dead reckoning
         self._pos_x = 0.0
@@ -414,6 +454,9 @@ class Navigator:
         self._progress_check_x = 0.0
         self._min_front_dist = 999.0
         self._rf_compensated = {}
+        self._astar_path = None
+        self._astar_last_reason = ""
+        self._early_cache = EarlySideCache()
         self.grid.reset()
         self.state = NavState()
 
@@ -510,7 +553,11 @@ class Navigator:
         """Called every physics step. Returns (vel_cmd, yaw_cmd) or (None, None)."""
 
         # ── 1. Dead reckoning ──
-        self._heading = self._wrap_angle(self._heading + estimator.yaw_rate * dt)
+        # Heading from gyro (immune to wheel slip during contour maneuvers).
+        # The balance controller still gets encoder-based yaw_rate for its
+        # LQR feedback — see StateEstimator.update for the rationale.
+        yaw_rate_dr = getattr(estimator, "yaw_rate_gyro", estimator.yaw_rate)
+        self._heading = self._wrap_angle(self._heading + yaw_rate_dr * dt)
         self._pos_x += estimator.forward_vel * math.cos(self._heading) * dt
         self._pos_y += estimator.forward_vel * math.sin(self._heading) * dt
 
@@ -533,6 +580,15 @@ class Navigator:
         # ── 3. Update occupancy grid ──
         self.grid.shift(self._pos_x, self._pos_y)
         self._update_grid(rf)
+
+        # ── 3b. Early avoidance side cache (session 10) ──
+        # The cache is always stepped (even when disabled) so that the
+        # FSM-is-GO-HEADING reset path stays byte-identical across flag
+        # states. With `_use_early_avoid = False` the cached side is
+        # never read by `_state_go_heading`, so the tick is free of
+        # any behavioural side-effect.
+        if self._use_early_avoid:
+            self._update_early_side(rf, dt)
 
         # ── 4. FSM dispatch ──
         vel_cmd, yaw_cmd = 0.0, 0.0
@@ -572,6 +628,114 @@ class Navigator:
 
         return self._smooth_vel, self._smooth_yaw
 
+    # ── Early avoidance side cache (session 10) ───────────────────
+
+    def _early_side_picker(self, rf) -> int | None:
+        """
+        Grid-based side selector for early avoidance.
+
+        Reuses the occupancy grid's log-odds accumulation so that
+        transient phantom hits (single-frame noise, spurious
+        returns on metal edges, etc.) are filtered out naturally:
+        we require log-odds > EARLY_STRICT_LOG_ODDS, which
+        corresponds to at least two independent confirming hits
+        (each hit is +LOG_ODD_OCC = +0.7). A one-shot phantom at
+        0.7 does not clear this bar; a stable obstacle observed
+        over two or more frames does.
+
+        The scan walks the grid directly with max_dist = d_cut +
+        margin so the full early-avoidance activation range is
+        covered, bypassing `clearance_in_direction`'s 1.5 m limit
+        and its tie-break on the raw rf_FL/FR readings (both of
+        which are why the long-range fallback was unreliable in
+        session 10's initial implementation).
+
+        The scoring is `clearance * (1 + 0.5 * cos(offset))` over
+        13 directions spanning +/- 60 degrees -- short enough to
+        ignore lateral corridor walls, long enough to reveal the
+        detour side for a frontal obstacle.
+
+        Returns
+        -------
+        +1 : best clearance is on the LEFT of the heading, the
+             bias should push yaw positive (turn left).
+        -1 : best clearance is on the RIGHT of the heading, the
+             bias should push yaw negative (turn right).
+        None : no stable obstacle is within scan range, nothing
+             to avoid yet -- the cache stays unlocked.
+
+        Centred obstacles (winning direction within +/- 10 deg of
+        the heading) are resolved with a deterministic right-side
+        tie-break. A symmetric head-on box would otherwise leave
+        the picker returning None for ever and the robot would
+        drive straight into it. This matches Risk B in the plan
+        (arbitrary tie-break for perfectly frontal obstacles).
+        """
+        STRICT_LOG_ODDS = 1.2     # > 1 hit; filters 1-frame phantoms (0.7)
+        SCAN_MAX = 2.20           # m, slightly above d_cut for full coverage
+        ANGLE_STEP_DEG = 10       # 13 samples over +/- 60 deg
+
+        best_angle_deg = None
+        best_score = -1.0
+        any_hit = False
+
+        max_steps = int(SCAN_MAX / GRID_RES)
+
+        for deg_offset in range(-60, 61, ANGLE_STEP_DEG):
+            world_angle = self._heading + math.radians(deg_offset)
+            cos_a = math.cos(world_angle)
+            sin_a = math.sin(world_angle)
+            clearance = SCAN_MAX
+            for s in range(1, max_steps + 1):
+                d = s * GRID_RES
+                wx = self._pos_x + d * cos_a
+                wy = self._pos_y + d * sin_a
+                ci, cj = self.grid.world_to_cell(wx, wy)
+                if not self.grid.in_bounds(ci, cj):
+                    break
+                if self.grid.grid[ci, cj] > STRICT_LOG_ODDS:
+                    clearance = d
+                    any_hit = True
+                    break
+            alignment = math.cos(math.radians(deg_offset))
+            score = clearance * (1.0 + 0.5 * alignment)
+            if score > best_score:
+                best_score = score
+                best_angle_deg = deg_offset
+
+        if not any_hit:
+            return None
+
+        if best_angle_deg is not None and best_angle_deg > 10:
+            return +1     # clearance on the left -> turn left
+        if best_angle_deg is not None and best_angle_deg < -10:
+            return -1     # clearance on the right -> turn right
+        return -1         # centred: deterministic right-side tie-break
+
+    def _update_early_side(self, rf, dt):
+        """
+        Advance the early avoidance side cache one physics tick.
+
+        The side selector is `_early_side_picker` which reads the
+        rangefinders directly; see that method for the rationale.
+        The cache state transitions are delegated to the pure helper
+        `update_side_cache` so they can be unit-tested without a
+        live simulator.
+        """
+        fsm_is_go = (self._fsm == FSMState.GO_HEADING)
+
+        def pick() -> int | None:
+            return self._early_side_picker(rf)
+
+        update_side_cache(
+            self._early_cache,
+            self._min_front_dist,
+            fsm_is_go,
+            dt,
+            pick,
+            self._early_params,
+        )
+
     # ── FSM: GO_HEADING ───────────────────────────────────────────
 
     def _state_go_heading(self, rf, dt):
@@ -584,6 +748,18 @@ class Navigator:
             return 0.0, 0.0
 
         yaw = HEADING_P_GAIN * h_err
+
+        # Early avoidance additive bias (session 10). Only active when
+        # the flag is on AND the side cache has locked a direction.
+        # The cache was updated earlier in `update()` so this is a
+        # pure read. `compute_bias_yaw` returns 0 outside the active
+        # distance range, so the gating here is redundant but explicit.
+        if self._use_early_avoid and self._early_cache.side is not None:
+            yaw += compute_bias_yaw(
+                self._min_front_dist,
+                self._early_cache.side,
+                self._early_params,
+            )
 
         alignment = math.cos(h_err)
         if alignment > ALIGNED_COS_THRESHOLD:
@@ -600,14 +776,34 @@ class Navigator:
     # ── FSM: CONTOUR ──────────────────────────────────────────────
 
     def _enter_contour(self, rf):
-        """Start wall-following. Choose side via virtual grid scan."""
+        """
+        Start wall-following. Pick the contouring side either from an
+        A* plan on the occupancy grid (if enabled) or from the legacy
+        virtual scan. A* failure transparently falls back to the scan.
+        """
         self._fsm = FSMState.CONTOUR
         self._contour_deviation = 0.0
         self._contour_timer = 0.0
         self._contour_start_x = self._heading_axis_projection()
+        self._astar_path = None
 
-        # Virtual scan on the occupancy grid — pick the direction with
-        # max clearance * alignment-to-heading weight.
+        if self._use_astar:
+            side = self._contour_side_from_astar()
+            if side is not None:
+                self._contour_side = side
+                return
+
+        self._contour_side = self._contour_side_from_virtual_scan(rf)
+
+    def _contour_side_from_virtual_scan(self, rf) -> int:
+        """
+        Legacy virtual-scan side selector.
+
+        Sweeps 13 directions around the heading, scores each by
+        `clearance * (1 + 0.5*cos(offset))`, and returns +1 or -1 based
+        on the winning angle plus a sensor-bias tie-breaker using
+        rf_FL / rf_FR.
+        """
         best_angle_deg = 0.0
         best_score = -1.0
 
@@ -629,11 +825,81 @@ class Navigator:
         sensor_bias = fl_val - fr_val  # positive = left is clearer
 
         if best_angle_deg > 10 or (best_angle_deg == 0 and sensor_bias > 0.1):
-            self._contour_side = -1
-        elif best_angle_deg < -10 or (best_angle_deg == 0 and sensor_bias < -0.1):
-            self._contour_side = 1
-        else:
-            self._contour_side = -1 if sensor_bias >= 0 else 1
+            return -1
+        if best_angle_deg < -10 or (best_angle_deg == 0 and sensor_bias < -0.1):
+            return 1
+        return -1 if sensor_bias >= 0 else 1
+
+    def _contour_side_from_astar(self) -> int | None:
+        """
+        Plan an A* path on the inflated occupancy grid and derive the
+        contour side from the initial tangent.
+
+        Returns
+        -------
+        +1 / -1 when the path unambiguously picks a side (initial
+        tangent deviates from the heading by more than ±10°), or None
+        when the planner fails, times out, or produces a path that is
+        too straight to disambiguate. In the None case the caller
+        falls back to the virtual scan.
+
+        Side convention matches `_state_contour`:
+            +1 → obstacle on LEFT,  robot contours by going RIGHT
+            -1 → obstacle on RIGHT, robot contours by going LEFT
+        """
+        planner = AStarPlanner(self.grid.grid, LOG_ODD_OCCUPIED_THRESHOLD)
+
+        start_cell = self.grid.world_to_cell(self._pos_x, self._pos_y)
+        goal_wx = self._pos_x + ASTAR_LOCAL_HORIZON * math.cos(self._target_heading)
+        goal_wy = self._pos_y + ASTAR_LOCAL_HORIZON * math.sin(self._target_heading)
+        goal_cell = self.grid.world_to_cell(goal_wx, goal_wy)
+
+        goal_cell = (
+            max(0, min(GRID_SIZE - 1, goal_cell[0])),
+            max(0, min(GRID_SIZE - 1, goal_cell[1])),
+        )
+        start_cell = (
+            max(0, min(GRID_SIZE - 1, start_cell[0])),
+            max(0, min(GRID_SIZE - 1, start_cell[1])),
+        )
+
+        # The robot may be physically inside its own inflation buffer
+        # when an obstacle sits at SAFE_DIST — nudge start to the
+        # nearest free cell before planning, otherwise A* refuses to
+        # start. Same treatment for a goal that falls inside an
+        # inflated obstacle.
+        start_free = nearest_free_cell(planner, *start_cell,
+                                       radius=INFLATE_CELLS + 1)
+        goal_free = nearest_free_cell(planner, *goal_cell,
+                                      radius=GOAL_SEARCH_RADIUS)
+        if start_free is None or goal_free is None:
+            self._astar_last_reason = "nudge_failed"
+            return None
+
+        result = planner.plan(start_free, goal_free)
+        self._astar_last_reason = result.reason
+        if result.path is None or len(result.path) < 2:
+            return None
+
+        self._astar_path = result.path
+
+        # Measure the path's bulk direction over the first 10 cells
+        # (~0.8 m). A single-step tangent is too noisy on an 8-conn
+        # staircase path: four-cell look-ahead averages over only 32 cm
+        # and the resulting angle can flip when the path takes one
+        # diagonal before committing to a side. Ten cells is long
+        # enough to reflect the real detour side while still staying
+        # inside the first half of the plan.
+        tangent_world = path_initial_tangent(result.path, look_ahead=10)
+        if tangent_world is None:
+            return None
+
+        rel = self._wrap_angle(tangent_world - self._heading)
+        if rel > math.radians(10.0):
+            return -1     # path turns left → obstacle on right
+        if rel < math.radians(-10.0):
+            return +1     # path turns right → obstacle on left
+        return None       # ambiguous — let the sensor-biased scan decide
 
     def _state_contour(self, rf, dt):
         """

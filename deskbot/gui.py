@@ -4,11 +4,14 @@ Control panel GUI for DeskBot — tkinter-based, runs in a separate thread.
 Provides a virtual joystick (click+drag) for velocity/yaw control,
 plus buttons for push and reset. Updates a shared Commands object.
 Navigation panel allows setting a heading direction for the robot to follow.
+Map panel opens an optional egocentric occupancy-grid viewer.
 """
 import math
 import threading
 import tkinter as tk
 import numpy as np
+
+from deskbot.mapviz import MapWindow, snapshot as save_map_snapshot
 
 
 # Joystick canvas size
@@ -27,6 +30,7 @@ class ControlPanel:
         self._root = None
         self._joy_dot = None
         self._dragging = False
+        self._map_window = None
 
     def start(self):
         """Launch the GUI in a background thread."""
@@ -181,6 +185,20 @@ class ControlPanel:
         )
         self._nav_pos_label.pack(fill="x")
 
+        # ── Map panel ──
+        map_frame = tk.LabelFrame(root, text="Map", padx=5, pady=5)
+        map_frame.pack(padx=8, pady=(4, 8), fill="x")
+        map_btn_row = tk.Frame(map_frame)
+        map_btn_row.pack(fill="x", pady=2)
+        tk.Button(
+            map_btn_row, text="Open Map", width=10,
+            command=self._on_open_map,
+        ).pack(side="left", padx=2)
+        tk.Button(
+            map_btn_row, text="Snapshot", width=10,
+            command=self._on_snapshot_map,
+        ).pack(side="left", padx=2)
+
         # Start status update loop
         self._update_status()
 
@@ -273,6 +291,36 @@ class ControlPanel:
     def _on_nav_stop(self):
         """Stop navigation."""
         self.commands.nav_stop_request = True
+
+    # ── Map ──
+
+    def _get_latest_map_frame(self):
+        """Thread-safe read of the latest MapFrame pushed by the sim loop."""
+        getter = getattr(self.commands, "get_map_frame", None)
+        if getter is None:
+            return None
+        return getter()
+
+    def _on_open_map(self):
+        """Open (or re-open) the egocentric map window."""
+        if self._map_window is not None:
+            try:
+                self._map_window._top.deiconify()
+                self._map_window._top.lift()
+                return
+            except Exception:
+                self._map_window = None
+        if self._root is None:
+            return
+        self._map_window = MapWindow(self._root, self._get_latest_map_frame)
+
+    def _on_snapshot_map(self):
+        """Save a PNG snapshot of the current map frame."""
+        frame = self._get_latest_map_frame()
+        if frame is None:
+            return
+        path = save_map_snapshot(frame, tag=frame.fsm_state or "idle")
+        print(f"[mapviz] saved snapshot: {path}")
 
     # ── Status update ──
 

@@ -1,0 +1,40 @@
+   [  1/30] ep=  0 [OK  ] X= 12.0 Y= -0.3 t= 23.5s cont=0 stuck=0 seed=1000
+   [  2/30] ep=  4 [OK  ] X= 12.0 Y= -0.3 t= 23.7s cont=0 stuck=0 seed=1004
+   [  3/30] ep=  6 [OK  ] X= 12.0 Y= -0.0 t= 23.2s cont=0 stuck=0 seed=1006
+   [  4/30] ep=  2 [OK  ] X= 12.0 Y= +0.1 t= 23.6s cont=0 stuck=0 seed=1002
+   [  5/30] ep=  5 [OK  ] X= 12.0 Y= -0.0 t= 23.6s cont=0 stuck=0 seed=1005
+   [  6/30] ep=  3 [OK  ] X= 12.0 Y= +0.2 t= 23.8s cont=0 stuck=0 seed=1003
+   [  7/30] ep=  7 [OK  ] X= 12.0 Y= -0.2 t= 23.3s cont=0 stuck=0 seed=1007
+   [  8/30] ep=  8 [OK  ] X= 12.0 Y= +0.0 t= 23.5s cont=0 stuck=0 seed=1008
+   [  9/30] ep=  9 [OK  ] X= 12.0 Y= +0.2 t= 23.4s cont=0 stuck=0 seed=1009
+   [ 10/30] ep= 10 [OK  ] X= 12.0 Y= -0.0 t= 23.2s cont=0 stuck=0 seed=1010
+   [ 11/30] ep= 12 [OK  ] X= 12.0 Y= +0.0 t= 23.1s cont=0 stuck=0 seed=1012
+>> [ 12/30] ep=  1 [FAIL] X=  6.6 Y= -0.2 t= 60.0s cont=22 stuck=9 seed=1001
+   [ 13/30] ep= 11 [OK  ] X= 12.0 Y= +1.2 t= 45.5s cont=6 stuck=2 seed=1011
+   [ 14/30] ep= 16 [OK  ] X= 12.0 Y= -0.2 t= 23.8s cont=0 stuck=0 seed=1016
+   [ 15/30] ep= 13 [OK  ] X= 12.0 Y= +0.3 t= 33.4s cont=4 stuck=1 seed=1013
+   [ 16/30] ep= 14 [OK  ] X= 12.0 Y= -0.5 t= 36.5s cont=3 stuck=0 seed=1014
+   [ 17/30] ep= 18 [OK  ] X= 12.0 Y= +0.0 t= 23.5s cont=0 stuck=0 seed=1018
+   [ 18/30] ep= 19 [OK  ] X= 12.0 Y= -0.1 t= 23.7s cont=0 stuck=0 seed=1019
+   [ 19/30] ep= 20 [OK  ] X= 12.0 Y= +1.0 t= 29.8s cont=1 stuck=0 seed=1020
+   [ 20/30] ep= 15 [OK  ] X= 12.0 Y= -0.8 t= 53.0s cont=10 stuck=5 seed=1015
+   [ 21/30] ep= 17 [OK  ] X= 12.0 Y= +1.1 t= 54.4s cont=13 stuck=6 seed=1017
+   [ 22/30] ep= 21 [OK  ] X= 12.0 Y= +0.0 t= 23.7s cont=0 stuck=0 seed=1021
+   [ 23/30] ep= 22 [OK  ] X= 12.0 Y= +0.0 t= 23.3s cont=0 stuck=0 seed=1022
+   [ 24/30] ep= 23 [OK  ] X= 12.0 Y= +0.1 t= 30.6s cont=4 stuck=0 seed=1023
+   [ 25/30] ep= 25 [OK  ] X= 12.0 Y= -0.1 t= 23.9s cont=0 stuck=0 seed=1025
+   [ 26/30] ep= 26 [OK  ] X= 12.0 Y= -0.2 t= 24.0s cont=0 stuck=0 seed=1026
+   [ 27/30] ep= 27 [OK  ] X= 12.0 Y= -0.3 t= 23.4s cont=0 stuck=0 seed=1027
+   [ 28/30] ep= 28 [OK  ] X= 12.0 Y= +0.2 t= 23.3s cont=0 stuck=0 seed=1028
+   [ 29/30] ep= 29 [OK  ] X= 12.0 Y= +0.1 t= 23.9s cont=0 stuck=0 seed=1029
+   [ 30/30] ep= 24 [OK  ] X= 12.0 Y= +0.9 t= 42.0s cont=4 stuck=4 seed=1024
+
+=================================================================
+  SUCCESS:  29/30 (97 %)
+  Falls:    0
+  Avg cont: 2.2
+  Wall:     47.6s (0.6 ep/s)
+=================================================================
+
+  FAILING SEEDS:
+    seed=1001 [FAIL] X=6.6 cont=22 stuck=9

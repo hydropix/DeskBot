@@ -4,6 +4,7 @@ Interactive simulation loop with real-time 3D viewer.
 Sensor pipeline: MuJoCo physics -> SensorModel (adds noise) -> StateEstimator -> Controller
 The controller never sees simulator internals.
 """
+import threading
 import time
 import math
 import numpy as np
@@ -16,6 +17,7 @@ from deskbot.control import BalanceController, LQRController, StateEstimator
 from deskbot.navigation import Navigator
 from deskbot.localization import create_apartment_localizer
 from deskbot.gui import ControlPanel
+from deskbot.mapviz import MapFrame, extract_gt_obstacles
 
 MOVE_SPEED = 2.0      # m/s
 TURN_SPEED = 3.0      # rad/s
@@ -42,6 +44,18 @@ class Commands:
         self.navigator = None  # set in run()
         self.nav_heading_request = None  # heading in degrees, set by GUI
         self.nav_stop_request = False
+        # Map viz: sim thread writes, GUI thread reads. Single-producer /
+        # single-consumer, atomic pointer swap under a small lock.
+        self._map_frame = None
+        self._map_lock = threading.Lock()
+
+    def push_map_frame(self, frame):
+        with self._map_lock:
+            self._map_frame = frame
+
+    def get_map_frame(self):
+        with self._map_lock:
+            return self._map_frame
 
 
 def _distance_color(dist: float) -> np.ndarray:
@@ -146,7 +160,8 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
     else:
         controller = LQRController(mj_model=model)
         print("  Controller: LQR (optimal)")
-    navigator = Navigator(dt, mj_model=model)
+    navigator = Navigator(dt, mj_model=model, use_astar=True, use_early_avoid=True)
+    print("  Planner: A* local (session 9) + early avoidance (session 10)")
 
     # Localization (WiFi + heading correction)
     if scene_name == "apartment":
@@ -158,6 +173,10 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
     commands = Commands()
     commands.navigator = navigator
     chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+
+    # Ground-truth obstacles for map debug overlay (read once at init — the
+    # navigator never sees this; it only reaches the tkinter map window).
+    gt_obstacles = extract_gt_obstacles(model)
 
     mujoco.mj_forward(model, data)
     init_qpos = data.qpos.copy()
@@ -296,6 +315,30 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
             # Feed estimator state to GUI for display
             commands._pitch_display = estimator.pitch
             commands._rangefinder_display = readings.rangefinders.copy()
+
+            # ── Push map frame to GUI. Sim produces ~60 fps; the tkinter
+            # MapWindow throttles display to 10 Hz.
+            #
+            # We always recompute compensated rangefinders here so the map
+            # stays informative even when the navigator is IDLE (otherwise
+            # the cached navigator._rf_compensated is empty / stale). Cost
+            # is negligible: 7 sensors, cheap geometry. ──
+            rf_comp_map = navigator.compensate_rangefinders(
+                readings.rangefinders, estimator.pitch
+            )
+            commands.push_map_frame(MapFrame(
+                grid=navigator.grid.grid.copy(),
+                grid_cx=navigator.grid.cx,
+                grid_cy=navigator.grid.cy,
+                robot_x=navigator._pos_x,
+                robot_y=navigator._pos_y,
+                heading=navigator._heading,
+                target_heading=navigator._target_heading,
+                nav_active=navigator._active,
+                fsm_state=navigator._fsm.value,
+                rf_compensated=rf_comp_map,
+                gt_obstacles=gt_obstacles,
+            ))
 
             # ── Draw rangefinder beams ──
             _draw_rangefinders(viewer, model, data, readings)
