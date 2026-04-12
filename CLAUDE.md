@@ -46,6 +46,31 @@ Coordinate system: **X=forward, Y=left, Z=up**. Angles in radians.
 - **Sign conventions matter.** Pitch: positive = leaning forward. Torque: positive = drives wheel forward. Yaw: positive = turning left. Getting these wrong causes the balance loop to diverge instantly.
 - **Accelerometer includes gravity.** The `SensorModel` converts MuJoCo's coordinate acceleration to proper acceleration (what a real IMU measures) by adding gravity rotated into the body frame. The estimator uses `atan2(-ax, az)` for pitch — don't change this without understanding why the negation is there.
 
+## Development Journal (MANDATORY)
+
+A project journal is maintained in `JOURNAL.md` at the repository root. It documents the complete development journey: what was tried, what worked, what failed, and the lessons learned. **Claude Code is an active participant in this project** -- not just a tool, but a design partner. The journal should reflect this: decisions are made collaboratively, and Claude's reasoning, suggestions, and mistakes are part of the story.
+
+### Update rules
+
+1. **When to update**: After every session that produces meaningful changes (new features, bug fixes, architectural decisions, failed experiments). Update the journal **at the same time** as saving to auto-memory -- these are complementary:
+   - **Memory** = internal recall for future Claude conversations (structured, machine-oriented).
+   - **Journal** = human-readable project history (narrative, meant to be read by Bruno or anyone reviewing the project).
+
+2. **What to record for each session**:
+   - **Session header**: `## Session N -- YYYY-MM-DD : Short Title`
+   - **What was done**: Bullet list of concrete changes (files created/modified, features added).
+   - **What worked**: Things that succeeded, especially if the reason is non-obvious.
+   - **What failed / lessons learned**: Honest account of failures, dead ends, and why. This is the most valuable part -- don't skip it or sugarcoat it.
+   - Update the **Roadmap** section at the bottom (check off completed items, add new ones).
+
+3. **Style**:
+   - Write in past tense, factual, concise.
+   - Include specific numbers (success rates, parameter values, measurements) when available.
+   - Reference file names but don't paste code -- the journal is a narrative, not a code dump.
+   - Failed experiments are as valuable as successes. Always explain *why* something failed, not just *that* it failed.
+
+4. **Never delete history.** Failed approaches stay in the journal. They document the reasoning process and prevent revisiting dead ends.
+
 ## Pedagogical Mode (MANDATORY)
 
 

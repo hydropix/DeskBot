@@ -6,9 +6,12 @@ Uses ONLY realistic sensor data (SensorReadings):
   - Wheel encoders → forward velocity & yaw rate
 
 This code is designed to be portable to a real microcontroller.
+The LQR gains are computed once at startup from the physical model,
+then the control loop uses only estimated state (sensor barrier preserved).
 """
 import math
 import numpy as np
+from scipy.linalg import solve_continuous_are
 
 from deskbot.sensors import SensorReadings
 from deskbot.robot import WHEEL_RADIUS, WHEEL_SEPARATION
@@ -53,7 +56,7 @@ class StateEstimator:
 
         vel_left = s.encoder_left * WHEEL_RADIUS
         vel_right = s.encoder_right * WHEEL_RADIUS
-        self.forward_vel = (vel_left + vel_right) / 2.0
+        self.forward_vel = (vel_left + vel_right) / 2.0 + self.pitch_rate * WHEEL_RADIUS
         self.yaw_rate = (vel_right - vel_left) / WHEEL_SEPARATION
 
         self.fallen = abs(self.pitch) > math.radians(40)
@@ -82,16 +85,16 @@ class BalanceController:
         self.vel_ki = 0.03
         self._vel_integral = 0.0
         self._target_pitch = 0.0
-        self._pitch_rate_limit = math.radians(12)  # 12 deg/s — snappy transitions
+        self._pitch_rate_limit = math.radians(40)  # 40 deg/s — fast response
 
         # ── Position hold (encoder odometry, active only when stopped) ──
         self.pos_kp = 0.15
         self._position = 0.0       # integrated displacement from encoders (m)
         self._holding = False
 
-        # ── Yaw ──
-        self.yaw_kp = 0.06
-        self.yaw_kd = 0.04
+        # ── Yaw (increased for navigation responsiveness) ──
+        self.yaw_kp = 0.18
+        self.yaw_kd = 0.08
 
     def reset(self):
         self._pitch_integral = 0.0
@@ -133,7 +136,7 @@ class BalanceController:
             self._vel_integral *= 0.99
 
         raw_target = self.vel_kp * vel_error + self.vel_ki * self._vel_integral
-        max_pitch = math.radians(10)
+        max_pitch = math.radians(25)
         raw_target = float(np.clip(raw_target, -max_pitch, max_pitch))
 
         # Rate limiter
@@ -164,9 +167,233 @@ class BalanceController:
             yaw_error = target_yaw_rate - est.yaw_rate
             yaw_torque = self.yaw_kp * yaw_error - self.yaw_kd * est.yaw_rate
             yaw_torque = float(np.clip(
-                yaw_torque, -self.max_torque * 0.15, self.max_torque * 0.15
+                yaw_torque, -self.max_torque * 0.25, self.max_torque * 0.25
             ))
 
         left = float(np.clip(base_torque - yaw_torque, -self.max_torque, self.max_torque))
         right = float(np.clip(base_torque + yaw_torque, -self.max_torque, self.max_torque))
+        return left, right
+
+
+class LQRController:
+    """
+    Optimal LQR controller for the self-balancing robot.
+
+    Replaces the cascaded PID with a single matrix multiply per step.
+    State vector: x = [pitch, pitch_rate, velocity, position, yaw_error, yaw_rate]
+    Control:      u = [torque_avg, torque_diff]
+
+    The linearized dynamics are derived from the Euler-Lagrange equations
+    of a 2D inverted pendulum on wheels, with a separate yaw subsystem.
+
+    Physical parameters are extracted from the MuJoCo compiled model once
+    at construction time (offline design). The control loop uses only
+    estimated state from sensors (sensor barrier preserved).
+    """
+
+    def __init__(self, mj_model=None, max_torque: float = 3.0):
+        self.max_torque = max_torque
+        self._position = 0.0
+        self._holding = False
+        # Low-pass filter on pitch_rate to attenuate gyro noise
+        # (~0.11 rad/s per sample at 500 Hz)
+        self._filtered_pitch_rate = 0.0
+        self._pitch_rate_alpha = 0.8  # smoothing factor (higher = more filtering)
+
+        if mj_model is not None:
+            self._compute_gains_from_model(mj_model)
+        else:
+            self._use_default_gains()
+
+    def _compute_gains_from_model(self, model):
+        """Extract physical parameters from compiled MuJoCo model and solve CARE."""
+        import mujoco
+
+        g = 9.81
+        R = WHEEL_RADIUS
+        L = WHEEL_SEPARATION
+
+        # ── Extract body parameters from compiled model ──
+        chassis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+        wheel_l_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "wheel_L")
+
+        # Total body mass (chassis = everything except wheels)
+        mb = float(model.body_mass[chassis_id])
+        # Wheel mass (per wheel)
+        mw = float(model.body_mass[wheel_l_id])
+
+        # CoM height above axle (chassis body frame origin = axle)
+        # model.body_ipos gives CoM relative to body frame
+        l = float(model.body_ipos[chassis_id][2])  # Z component
+        if l < 0.01:
+            l = 0.038  # fallback: computed from MJCF geom positions
+
+        # Body moment of inertia about pitch axis (Y-axis in body frame)
+        # model.body_inertia gives diagonal [Ixx, Iyy, Izz] at CoM
+        Ib_com = float(model.body_inertia[chassis_id][1])  # Iyy
+        # Parallel axis theorem: Ib about axle = Ib_com + mb * l²
+        Ib = Ib_com + mb * l ** 2
+
+        # Wheel MOI about rotation axis (Y-axis, hinge axis)
+        # Cylinder: I = 0.5 * m * r²
+        Iw = 0.5 * mw * R ** 2
+
+        # Yaw MOI: Izz of chassis + wheel contributions
+        Iz_com = float(model.body_inertia[chassis_id][2])  # Izz
+        Iz = Iz_com + 2 * mw * (L / 2) ** 2  # + wheels at distance L/2
+
+        self._build_lqr(mb, mw, l, Ib, Iw, Iz, R, L, g)
+
+    def _use_default_gains(self):
+        """Fallback gains computed from nominal DeskBot parameters."""
+        g = 9.81
+        R = WHEEL_RADIUS
+        L = WHEEL_SEPARATION
+
+        mb = 0.602   # kg (sum of all chassis geom masses)
+        mw = 0.05    # kg per wheel
+        l = 0.038    # m (CoM above axle)
+        Ib_com = 0.0015  # approximate Iyy at CoM
+        Ib = Ib_com + mb * l ** 2
+        Iw = 0.5 * mw * R ** 2
+        Iz = 0.002 + 2 * mw * (L / 2) ** 2
+
+        self._build_lqr(mb, mw, l, Ib, Iw, Iz, R, L, g)
+
+    def _build_lqr(self, mb, mw, l, Ib, Iw, Iz, R, L, g):
+        """Build linearized state-space model and solve the Riccati equation."""
+
+        # ── Balance subsystem (pitch, pitch_rate, velocity, position) ──
+        # Euler-Lagrange for inverted pendulum on wheels:
+        #   a*θ̈ + b*φ̈ = d*θ - τ     (body)
+        #   b*θ̈ + c*φ̈ = τ            (wheels)
+        # where φ = average wheel angle, τ = average torque
+        a = Ib                                      # body inertia about axle
+        b = mb * l * R                              # coupling
+        c = (mb + 2 * mw) * R ** 2 + 2 * Iw        # wheel effective inertia
+        d = mb * g * l                              # gravity torque
+
+        det = a * c - b ** 2  # determinant of mass matrix
+
+        # Solve for θ̈ and v̇ (v = R*φ̇):
+        # θ̈ = (c*d/det)*θ - ((c+b)/det)*τ
+        # v̇ = (-R*b*d/det)*θ + (R*(a+b)/det)*τ
+
+        # State: x_bal = [θ, θ̇, v, p]
+        A_bal = np.zeros((4, 4))
+        A_bal[0, 1] = 1.0                    # θ̇
+        A_bal[1, 0] = c * d / det            # θ̈ from θ
+        A_bal[2, 0] = -R * b * d / det       # v̇ from θ
+        A_bal[3, 2] = 1.0                    # ṗ = v
+
+        B_bal = np.zeros((4, 1))
+        B_bal[1, 0] = -(c + b) / det         # θ̈ from τ
+        B_bal[2, 0] = R * (a + b) / det      # v̇ from τ
+
+        # ── Yaw subsystem (yaw_error, yaw_rate) ──
+        # τ_diff = (right - left) / 2
+        # ψ̈ = τ_diff * L / (R * Iz_eff)
+        Iz_eff = Iz + 2 * Iw * (L / (2 * R)) ** 2
+        yaw_gain = L / (R * Iz_eff)
+
+        A_yaw = np.array([[0.0, 1.0],
+                          [0.0, 0.0]])
+        B_yaw = np.array([[0.0],
+                          [yaw_gain]])
+
+        # ── Combined 6-state system ──
+        # x = [pitch, pitch_rate, velocity, position, yaw_error, yaw_rate]
+        # u = [τ_avg, τ_diff]
+        A = np.zeros((6, 6))
+        A[:4, :4] = A_bal
+        A[4:, 4:] = A_yaw
+
+        B = np.zeros((6, 2))
+        B[:4, 0:1] = B_bal
+        B[4:, 1:2] = B_yaw
+
+        # ── Cost matrices (Q penalizes state, R penalizes effort) ──
+        # Tuned for robustness to sensor noise:
+        #   - Gyro noise ~0.11 rad/s per sample → keep pitch_rate Q low
+        #   - R_avg high enough to prevent noise amplification
+        #   - Small robot inertia (det ~1e-5) means B elements are huge (~780)
+        #     so gains must be conservative to avoid noise-driven oscillation
+        Q = np.diag([
+            80.0,    # pitch — keep upright
+            0.5,     # pitch_rate — LOW: gyro noise ~0.11 rad/s per sample
+            4.0,     # velocity — track speed commands
+            2.0,     # position — hold position when stopped
+            5.0,     # yaw_error — track heading
+            0.3,     # yaw_rate — smooth turns
+        ])
+        R_cost = np.diag([
+            8.0,     # τ_avg — HIGH: penalize effort to reduce noise sensitivity
+            10.0,    # τ_diff — yaw torque (even more conservative)
+        ])
+
+        # ── Solve continuous algebraic Riccati equation ──
+        P = solve_continuous_are(A, B, Q, R_cost)
+        self.K = np.linalg.inv(R_cost) @ B.T @ P
+
+        # Store for diagnostics
+        self._A = A
+        self._B = B
+        self._Q = Q
+        self._R_cost = R_cost
+        self._params = {
+            "mb": mb, "mw": mw, "l": l, "Ib": Ib, "Iw": Iw, "Iz": Iz,
+            "det": det, "yaw_gain": yaw_gain,
+        }
+
+    def reset(self):
+        self._position = 0.0
+        self._holding = False
+        self._filtered_pitch_rate = 0.0
+
+    def compute(
+        self,
+        est: 'StateEstimator',
+        target_velocity: float,
+        target_yaw_rate: float,
+        dt: float,
+    ) -> tuple[float, float]:
+        """
+        Returns (left_torque, right_torque). Uses only estimated state.
+
+        u = -K @ x  where x is the error state relative to setpoint.
+        Then: left = u_avg - u_diff, right = u_avg + u_diff.
+        """
+        # Position hold: integrate displacement when stopped
+        stopped = abs(target_velocity) < 0.01
+        if stopped:
+            if not self._holding:
+                self._position = 0.0
+                self._holding = True
+            self._position += est.forward_vel * dt
+        else:
+            self._holding = False
+            self._position = 0.0
+
+        # Low-pass filter on pitch_rate to reduce gyro noise amplification
+        a = self._pitch_rate_alpha
+        self._filtered_pitch_rate = a * self._filtered_pitch_rate + (1 - a) * est.pitch_rate
+
+        # State error vector (deviation from desired equilibrium)
+        x = np.array([
+            est.pitch,                             # pitch error (want 0)
+            self._filtered_pitch_rate,             # filtered pitch rate (want 0)
+            est.forward_vel - target_velocity,     # velocity error
+            self._position,                        # position error (when holding)
+            0.0,                                   # yaw error (handled below)
+            est.yaw_rate - target_yaw_rate,        # yaw rate error
+        ])
+
+        # Compute optimal control: u = -K @ x
+        u = -self.K @ x
+
+        u_avg = float(np.clip(u[0], -self.max_torque, self.max_torque))
+        u_diff = float(np.clip(u[1], -self.max_torque * 0.4, self.max_torque * 0.4))
+
+        left = float(np.clip(u_avg - u_diff, -self.max_torque, self.max_torque))
+        right = float(np.clip(u_avg + u_diff, -self.max_torque, self.max_torque))
         return left, right

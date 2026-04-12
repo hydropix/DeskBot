@@ -1,7 +1,8 @@
 <mujoco model="deskbot">
   <!--
-    DeskBot — Self-balancing two-wheeled desktop robot (~25 cm tall).
+    DeskBot — Self-balancing two-wheeled desktop robot.
     Coordinate system: X=forward, Y=left, Z=up.
+    Wheel radius: 10cm, body ~18cm tall, total ~21cm from ground.
 
     This file describes the robot only (no environment).
     Use scene.xml for a complete simulation with ground and lighting.
@@ -38,63 +39,115 @@
   </asset>
 
   <worldbody>
-    <body name="chassis" pos="0 0 0.04">
+    <body name="chassis" pos="0 0 0.10">
       <joint type="free"/>
-      <inertial pos="0 0 0.12" mass="0.586" diaginertia="0.001 0.001 0.0005"/>
+      <!-- No explicit <inertial>: MuJoCo computes CoM from geom masses.
+           Mass distribution: light base, heavy head → CoM above axle
+           for inverted pendulum dynamics. -->
 
-      <!-- Motor housing (base) -->
-      <geom name="base" type="box" size="0.04 0.055 0.025"
-            pos="0 0 0.025" mass="0.12" material="chassis"/>
+      <!-- Motor housing (base) — cylinder centered on wheel axle (Y-axis).
+           Radius 9cm < wheel radius 10cm = 10mm constant ground clearance
+           at any pitch angle. Upper part hidden inside body; bottom arc
+           acts as a curved skid plate. -->
+      <geom name="base" type="cylinder" size="0.09 0.065"
+            pos="0 0 0" euler="1.5708 0 0"
+            mass="0.05" material="chassis"/>
 
-      <!-- Main body column -->
-      <geom name="column" type="box" size="0.028 0.042 0.055"
-            pos="0 0 0.105" mass="0.08" material="body"/>
+      <!-- Main body — cubic block, straddles axle -->
+      <geom name="body" type="box" size="0.05 0.058 0.055"
+            pos="0 0 0.015" mass="0.35" material="body"/>
 
-      <!-- Battery compartment -->
-      <geom name="battery" type="box" size="0.032 0.048 0.035"
-            pos="0 0 0.19" mass="0.30" material="body"/>
+      <!-- Head (battery + electronics → heavy) -->
+      <geom name="head" type="box" size="0.04 0.048 0.016"
+            pos="0 0 0.086" mass="0.18" material="accent"/>
 
-      <!-- Head / sensor pod -->
-      <geom name="head" type="box" size="0.026 0.038 0.018"
-            pos="0 0 0.245" mass="0.08" material="accent"/>
+      <!-- Sensor pod — small platform 1cm above head for VL53L0X modules.
+           Clearance: sqrt(0² + 0.112²) = 11.2cm > R=10cm → 12mm margin.
+           The pod sits just above the wheel tops. -->
+      <geom name="sensor_pod" type="box" size="0.030 0.030 0.005"
+            pos="0.005 0 0.107" mass="0.02" material="chassis"/>
 
       <!-- Front screen / LED indicator -->
-      <geom name="screen" type="box" size="0.001 0.025 0.012"
-            pos="0.033 0 0.19" material="screen" class="visual"/>
+      <geom name="screen" type="box" size="0.001 0.035 0.030"
+            pos="0.051 0 0.015" material="screen" class="visual"/>
 
-      <!-- Face indicator -->
-      <geom name="face" type="box" size="0.001 0.015 0.008"
-            pos="0.027 0 0.245" material="screen" class="visual"/>
+      <!-- Face indicator on head -->
+      <geom name="face" type="box" size="0.001 0.020 0.010"
+            pos="0.041 0 0.086" material="screen" class="visual"/>
 
       <!-- IMU sensor site (near CoM) -->
-      <site name="imu" pos="0 0 0.12" size="0.003" rgba="1 0 0 0.5"/>
+      <site name="imu" pos="0 0 0.0" size="0.003" rgba="1 0 0 0.5"/>
 
       <!-- Camera mount site (on head, forward-facing) -->
-      <site name="cam_mount" pos="0.026 0 0.245" zaxis="1 0 0" size="0.005"
+      <site name="cam_mount" pos="0.04 0 0.086" zaxis="1 0 0" size="0.005"
             rgba="0.2 0.2 0.2 1"/>
 
-      <!-- Left wheel -->
-      <body name="wheel_L" pos="0 0.07 0">
+      <!-- VL53L0X rangefinder sites.
+           FRONT (FC, FL, FR): mounted LOW on body front face (Z=-0.04,
+               6cm from ground). Mounted HORIZONTAL (0deg tilt) — the
+               robot's own pitch provides the downward tilt naturally:
+               faster → more lean → more tilt → ground scan.
+               At rest (0 pitch), sensors look straight ahead at body height
+               and detect obstacles (walls, furniture). This gives 3-4x more
+               range at speed compared to a fixed -20deg tilt.
+
+           SIDE (SL, SR): mounted HIGH on sensor pod (Z=0.112, 21cm from
+               ground). Tilted -5deg down. Side-pointing rays must clear the
+               wheel circle. Pod height guarantees 9mm+ margin.  -->
+
+      <!-- FC: front center — LOW mount, horizontal -->
+      <site name="rf_FC" pos="0.055 0 -0.04"
+            zaxis="1 0 0"
+            size="0.004" rgba="1 0.2 0.2 0.8"/>
+      <!-- FL: front-left 30deg — LOW mount, near center, horizontal -->
+      <site name="rf_FL" pos="0.055 0.015 -0.04"
+            zaxis="0.866 0.5 0"
+            size="0.004" rgba="1 0.2 0.2 0.8"/>
+      <!-- FR: front-right 30deg — LOW mount, near center, horizontal -->
+      <site name="rf_FR" pos="0.055 -0.015 -0.04"
+            zaxis="0.866 -0.5 0"
+            size="0.004" rgba="1 0.2 0.2 0.8"/>
+      <!-- FL2: front-left-wide 55deg — HIGH mount on pod, -5deg tilt
+           Optimal angle from sweep: 50-55deg range maximizes wall+gap detection.
+           cos(55°)=0.5736, sin(55°)=0.8192, with -5deg tilt applied -->
+      <site name="rf_FL2" pos="0.015 0.025 0.112"
+            zaxis="0.5714 0.8161 -0.0872"
+            size="0.004" rgba="1 0.6 0.2 0.8"/>
+      <!-- FR2: front-right-wide 55deg — HIGH mount on pod, -5deg tilt -->
+      <site name="rf_FR2" pos="0.015 -0.025 0.112"
+            zaxis="0.5714 -0.8161 -0.0872"
+            size="0.004" rgba="1 0.6 0.2 0.8"/>
+      <!-- SL: side-left 90deg — HIGH mount on pod, -5deg tilt -->
+      <site name="rf_SL" pos="0.0 0.025 0.112"
+            zaxis="0 0.9962 -0.0872"
+            size="0.004" rgba="1 0.2 0.2 0.8"/>
+      <!-- SR: side-right 90deg — HIGH mount on pod, -5deg tilt -->
+      <site name="rf_SR" pos="0.0 -0.025 0.112"
+            zaxis="0 -0.9962 -0.0872"
+            size="0.004" rgba="1 0.2 0.2 0.8"/>
+
+      <!-- Left wheel (R=10cm, tight to body: 13mm gap) -->
+      <body name="wheel_L" pos="0 0.08 0">
         <joint name="wheel_L" type="hinge" axis="0 1 0" class="wheel"/>
-        <geom name="tire_L" type="cylinder" size="0.04 0.009"
+        <geom name="tire_L" type="cylinder" size="0.10 0.009"
               euler="1.5708 0 0" class="wheel"/>
-        <geom name="hub_L" type="cylinder" size="0.018 0.01"
+        <geom name="hub_L" type="cylinder" size="0.045 0.01"
               euler="1.5708 0 0" class="hub"/>
       </body>
 
-      <!-- Right wheel -->
-      <body name="wheel_R" pos="0 -0.07 0">
+      <!-- Right wheel (R=10cm, tight to body: 13mm gap) -->
+      <body name="wheel_R" pos="0 -0.08 0">
         <joint name="wheel_R" type="hinge" axis="0 1 0" class="wheel"/>
-        <geom name="tire_R" type="cylinder" size="0.04 0.009"
+        <geom name="tire_R" type="cylinder" size="0.10 0.009"
               euler="1.5708 0 0" class="wheel"/>
-        <geom name="hub_R" type="cylinder" size="0.018 0.01"
+        <geom name="hub_R" type="cylinder" size="0.045 0.01"
               euler="1.5708 0 0" class="hub"/>
       </body>
 
       <!-- Robot-attached cameras -->
-      <camera name="follow" mode="track" pos="0.6 -0.4 0.35"
+      <camera name="follow" mode="track" pos="0.8 -0.5 0.4"
               xyaxes="0.6 1 0 -0.2 0 1"/>
-      <camera name="onboard" mode="fixed" pos="0.04 0 0.25"
+      <camera name="onboard" mode="fixed" pos="0.06 0 0.10"
               xyaxes="0 -1 0 0 0 1"/>
     </body>
   </worldbody>
@@ -111,5 +164,8 @@
     <!-- Wheel encoders: angular velocity -->
     <jointvel name="enc_L" joint="wheel_L"/>
     <jointvel name="enc_R" joint="wheel_R"/>
+    <!-- VL53L0X rangefinders use custom mj_ray in sensors.py (not built-in
+         rangefinder sensors) to exclude wheel geoms via group filtering.
+         Sites define ray origin + direction; raycasting done in Python. -->
   </sensor>
 </mujoco>

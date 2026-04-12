@@ -21,17 +21,27 @@ GYRO_NOISE_DENSITY = 0.005        # rad/s / sqrt(Hz)  (~0.3 °/s/√Hz)
 GYRO_BIAS_STABILITY = 0.0002      # rad/s  (slow drift ~0.01 °/s)
 
 # ── Encoder parameters ─────────────────────────────────────────────
-ENCODER_TICKS_PER_REV = 360       # typical magnetic encoder resolution
+ENCODER_TICKS_PER_REV = 1440      # 360-line encoder with 4x quadrature decoding
 TICK_SIZE = 2 * math.pi / ENCODER_TICKS_PER_REV  # rad per tick
+
+# ── Rangefinder parameters (VL53L0X) ──────────────────────────────
+RF_NAMES = ["rf_FC", "rf_FL", "rf_FR", "rf_FL2", "rf_FR2", "rf_SL", "rf_SR"]
+RF_MAX_RANGE = 2.0        # meters (cutoff in MJCF)
+RF_NOISE_SIGMA = 0.005    # 5mm gaussian noise
+RF_NOISE_PERCENT = 0.03   # 3% of reading
 
 
 class SensorReadings:
     """What the robot's microcontroller actually receives each cycle."""
     __slots__ = (
-        "accel",         # [ax, ay, az] in body frame (m/s²)
-        "gyro",          # [wx, wy, wz] in body frame (rad/s)
-        "encoder_left",  # wheel angular velocity (rad/s), quantized
+        "accel",              # [ax, ay, az] in body frame (m/s²)
+        "gyro",               # [wx, wy, wz] in body frame (rad/s)
+        "encoder_left",       # wheel angular velocity (rad/s), quantized
         "encoder_right",
+        "rangefinders",       # dict: name -> distance in meters (-1.0 = no hit)
+        "collision_detected", # bool: impact detected this cycle
+        "collision_magnitude",# float: impact strength (m/s², 0 if no collision)
+        "collision_direction",# [dx, dy, dz] unit vector of impact in body frame
     )
 
     def __init__(self):
@@ -39,6 +49,62 @@ class SensorReadings:
         self.gyro = np.zeros(3)
         self.encoder_left = 0.0
         self.encoder_right = 0.0
+        self.rangefinders = {name: -1.0 for name in RF_NAMES}
+        self.collision_detected = False
+        self.collision_magnitude = 0.0
+        self.collision_direction = np.zeros(3)
+
+
+# ── Collision detection parameters ────────────────────────────────
+COLLISION_THRESHOLD = 15.0    # m/s² — impact magnitude to trigger detection
+COLLISION_HP_ALPHA = 0.95     # high-pass filter coefficient (higher = more filtering of DC)
+GRAVITY_NOMINAL = 9.81        # m/s² — expected gravity magnitude at rest
+
+
+class CollisionDetector:
+    """
+    Detects collisions using a high-pass filter on the accelerometer signal.
+
+    The accelerometer constantly reads ~9.81 m/s² (gravity) plus balance
+    corrections (~2-5 m/s² at <5 Hz). Collisions produce sharp spikes
+    (>15 m/s² at >20 Hz). A first-order high-pass filter separates them.
+
+    High-pass filter: y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+    This removes the DC component (gravity) and low-frequency balance signal,
+    leaving only transient impacts.
+    """
+
+    def __init__(self, dt: float):
+        self.dt = dt
+        self._prev_accel = np.zeros(3)
+        self._hp_accel = np.zeros(3)  # high-pass filtered output
+
+    def reset(self):
+        self._prev_accel = np.zeros(3)
+        self._hp_accel = np.zeros(3)
+
+    def process(self, readings: 'SensorReadings'):
+        """Update collision fields in a SensorReadings object."""
+        accel = readings.accel
+
+        # High-pass filter: removes gravity + slow balance oscillations
+        self._hp_accel = COLLISION_HP_ALPHA * (
+            self._hp_accel + accel - self._prev_accel
+        )
+        self._prev_accel = accel.copy()
+
+        # Impact magnitude (norm of high-passed signal)
+        magnitude = float(np.linalg.norm(self._hp_accel))
+
+        if magnitude > COLLISION_THRESHOLD:
+            readings.collision_detected = True
+            readings.collision_magnitude = magnitude
+            # Direction: normalize the high-pass vector
+            readings.collision_direction = self._hp_accel / magnitude
+        else:
+            readings.collision_detected = False
+            readings.collision_magnitude = 0.0
+            readings.collision_direction = np.zeros(3)
 
 
 class SensorModel:
@@ -47,6 +113,7 @@ class SensorModel:
     This is the ONLY bridge between the simulator and the controller.
     """
     def __init__(self, model: mujoco.MjModel, dt: float):
+        self._model = model
         self.dt = dt
         self._sqrt_dt = math.sqrt(dt)
         self._sample_rate = 1.0 / dt
@@ -69,6 +136,19 @@ class SensorModel:
         self._imu_site_id = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_SITE, "imu"
         )
+
+        # Rangefinder site ids (raycasting done via mj_ray, not built-in sensor)
+        self._rf_site_ids = {}
+        for name in RF_NAMES:
+            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
+            if site_id >= 0:
+                self._rf_site_ids[name] = site_id
+
+        # Chassis body id — excluded from raycasting via bodyexclude
+        self._chassis_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, "chassis"
+        )
+        self._rf_geomid_buf = np.zeros(1, dtype=np.int32)
         self._gravity = np.array([0.0, 0.0, -model.opt.gravity[2]])  # [0, 0, 9.81]
 
         # Persistent bias state (random walk)
@@ -79,11 +159,15 @@ class SensorModel:
         self._enc_l_accum = 0.0
         self._enc_r_accum = 0.0
 
+        # Collision detector
+        self._collision_detector = CollisionDetector(dt)
+
     def reset(self):
         self._accel_bias = np.zeros(3)
         self._gyro_bias = np.zeros(3)
         self._enc_l_accum = 0.0
         self._enc_r_accum = 0.0
+        self._collision_detector.reset()
 
     def read(self, data: mujoco.MjData) -> SensorReadings:
         """Sample all sensors with realistic noise."""
@@ -124,5 +208,26 @@ class SensorModel:
         # Convert ticks back to angular velocity
         r.encoder_left = (ticks_l * TICK_SIZE) / self.dt
         r.encoder_right = (ticks_r * TICK_SIZE) / self.dt
+
+        # ── Rangefinders (VL53L0X via mj_ray) ──
+        # Sensors are physically mounted on the sensor pod, outside all robot
+        # geoms. bodyexclude=chassis_id skips chassis-body geoms; the sensor
+        # pod placement guarantees rays clear the wheels without hacks.
+        for name, site_id in self._rf_site_ids.items():
+            origin = data.site_xpos[site_id].copy()
+            direction = data.site_xmat[site_id].reshape(3, 3)[:, 2]
+
+            dist = mujoco.mj_ray(
+                self._model, data, origin, direction,
+                None, 1, self._chassis_id, self._rf_geomid_buf,
+            )
+            if dist < 0 or dist > RF_MAX_RANGE:
+                r.rangefinders[name] = -1.0
+            else:
+                noise = (dist * RF_NOISE_PERCENT + RF_NOISE_SIGMA) * np.random.randn()
+                r.rangefinders[name] = max(0.0, dist + noise)
+
+        # ── Collision detection (high-pass filter on accel) ──
+        self._collision_detector.process(r)
 
         return r

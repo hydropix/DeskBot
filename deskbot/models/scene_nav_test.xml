@@ -1,0 +1,91 @@
+<mujoco model="deskbot_nav_test">
+  <!--
+    Navigation test scene — simple obstacle course on a straight heading.
+    Robot starts at (0, 0) facing +X. Three obstacles of increasing
+    difficulty are placed along the +X axis.
+
+    Layout (top view, Y-up = left):
+
+    Robot   A (box)      B (cylinder)       C (wall+gap)
+      *     [##]           (O)             |========   |
+    X=0     X=3           X=6              X=9
+
+    Ground: 15m x 6m, centered at (7, 0).
+    No side walls — pure obstacle avoidance test.
+  -->
+
+  <include file="deskbot.xml"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast">
+    <flag multiccd="enable"/>
+  </option>
+
+  <visual>
+    <headlight diffuse="0.5 0.5 0.5" ambient="0.3 0.3 0.3"/>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+
+  <statistic center="5.0 0 0.15" extent="8.0"/>
+
+  <asset>
+    <texture type="2d" name="grid_tex" builtin="checker" width="512" height="512"
+             rgb1="0.45 0.45 0.48" rgb2="0.40 0.40 0.43"
+             mark="edge" markrgb="0.35 0.35 0.38"/>
+    <material name="ground" texture="grid_tex" texrepeat="30 12"
+              specular="0.1" shininess="0.05"/>
+    <material name="obstacle" rgba="0.70 0.25 0.20 1" specular="0.3" shininess="0.2"/>
+    <material name="wall_obs" rgba="0.55 0.55 0.60 1" specular="0.2" shininess="0.1"/>
+    <material name="start_zone" rgba="0.2 0.8 0.3 0.3" specular="0" shininess="0"/>
+    <material name="finish_zone" rgba="0.8 0.2 0.3 0.3" specular="0" shininess="0"/>
+  </asset>
+
+  <worldbody>
+    <light pos="5 -3 4" dir="0 0.3 -1" diffuse="0.7 0.7 0.7" castshadow="true"/>
+    <light pos="5  3 4" dir="0 -0.3 -1" diffuse="0.5 0.5 0.5" castshadow="false"/>
+
+    <!-- Ground plane -->
+    <geom name="floor" type="plane" size="15 6 0.05" material="ground"
+          contype="1" conaffinity="1"/>
+
+    <!-- Start zone marker (visual only) -->
+    <geom type="box" size="0.15 0.15 0.001" pos="0 0 0.002"
+          material="start_zone" contype="0" conaffinity="0"/>
+
+    <!-- Finish zone marker at X=12 (visual only) -->
+    <geom type="box" size="0.15 0.15 0.001" pos="12 0 0.002"
+          material="finish_zone" contype="0" conaffinity="0"/>
+
+    <!-- Side walls to constrain lateral deviation (corridor 3m wide) -->
+    <geom name="wall_north" type="box" size="8.0 0.05 0.15"
+          pos="6.0 1.50 0.15" material="wall_obs"/>
+    <geom name="wall_south" type="box" size="8.0 0.05 0.15"
+          pos="6.0 -1.50 0.15" material="wall_obs"/>
+
+    <!-- ============================================================
+         OBSTACLE A — Box, centered on the heading line
+         60cm x 60cm x 30cm tall, at X=3, Y=0
+         The robot MUST deviate to go around it.
+         Gap north: 1.50 - 0.30 = 1.20m. Gap south: 1.50 - 0.30 = 1.20m.
+         ============================================================ -->
+    <geom name="obstacle_A" type="box" size="0.30 0.30 0.15"
+          pos="3.0 0.0 0.15" material="obstacle"/>
+
+    <!-- ============================================================
+         OBSTACLE B — Cylinder, offset 40cm south of heading
+         R=25cm, 30cm tall, at X=6, Y=-0.40
+         Gap north: 1.50 - (-0.40+0.25) = 1.65m (easy).
+         Gap south: 1.50 - (0.40+0.25) = 0.85m (tight but passable).
+         ============================================================ -->
+    <geom name="obstacle_B" type="cylinder" size="0.25 0.15"
+          pos="6.0 -0.40 0.15" material="obstacle"/>
+
+    <!-- ============================================================
+         OBSTACLE C — Wall with a gap on the south side
+         Wall: spans Y=[-0.20, 1.50] (attached to north wall).
+         Gap: south side, Y=[-1.50, -0.20] = 1.30m wide.
+         ============================================================ -->
+    <geom name="obstacle_C" type="box" size="0.05 0.85 0.15"
+          pos="9.0 0.65 0.15" material="wall_obs"/>
+
+  </worldbody>
+</mujoco>

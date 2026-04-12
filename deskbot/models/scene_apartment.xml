@@ -1,0 +1,476 @@
+<mujoco model="deskbot_apartment">
+  <!--
+    DeskBot apartment scene — realistic indoor environment for obstacle avoidance.
+    Standard French T2 apartment (~50m²). Robot starts in salon facing +X.
+
+    Robot dimensions: 24cm wide (wheel-to-wheel), 24cm long (wheel diameter).
+    Minimum passage: 35cm (24cm + 5.5cm margin each side).
+    All passages >= 40cm except ONE challenge passage at ~30cm.
+
+    Coordinate system: X=forward, Y=left, Z=up.
+    Wall height: 0.40m (low for camera). Wall half-thickness: 0.05m.
+
+    ROOM LAYOUT (inner dimensions, wall-to-wall):
+
+    Y=5.20 ┌─────────────────────────────────────────────────┐
+           │                   CHAMBRE                        │
+           │                 7.00 × 3.00m                     │
+           │                                                  │
+    Y=2.20 │  ┌─ door 0.80m ─┐                               │
+    Y=2.10 ├──┴───────────────┴───────────────────────────────┤ COULOIR
+    Y=1.10 ├─door─┬────door────┬────door──────────────────────┤ 1.00m wide
+    Y=1.00 │      │            │            │                 │
+           │SALON │  CUISINE   │    SDB     │                 │
+           │3.00× │  2.50×     │  1.30×     │                 │
+           │2.50m │  2.50m     │  2.50m     │                 │
+    Y=-1.50└──────┴────────────┴────────────┴─────────────────┘
+          X=-0.50  X=2.60     X=5.20      X=6.50
+
+    Wall coordinates (center / inner edges):
+      West:           X_c=-0.55  inner=-0.50
+      East:           X_c= 6.55  inner= 6.50
+      South:          Y_c=-1.55  inner=-1.50
+      North:          Y_c= 5.25  inner= 5.20
+      Salon/Couloir:  Y_c= 1.05  salon=1.00  corridor=1.10
+      Couloir/Chambre:Y_c= 2.15  corridor=2.10  chambre=2.20
+      Salon/Cuisine:  X_c= 2.55  salon=2.50  cuisine=2.60
+      Cuisine/SDB:    X_c= 5.15  cuisine=5.10  SDB=5.20
+  -->
+
+  <include file="deskbot.xml"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast">
+    <flag multiccd="enable"/>
+  </option>
+
+  <visual>
+    <headlight diffuse="0.4 0.4 0.4" ambient="0.35 0.35 0.35"/>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <statistic center="3.0 2.0 0.15" extent="5.0"/>
+
+  <asset>
+    <!-- Floor textures -->
+    <texture type="2d" name="parquet_tex" builtin="checker" width="512" height="512"
+             rgb1="0.55 0.40 0.25" rgb2="0.50 0.36 0.22"
+             mark="edge" markrgb="0.45 0.32 0.20"/>
+    <material name="parquet" texture="parquet_tex" texrepeat="40 40"
+              specular="0.3" shininess="0.2" reflectance="0.05"/>
+
+    <texture type="2d" name="carrelage_tex" builtin="checker" width="512" height="512"
+             rgb1="0.82 0.80 0.78" rgb2="0.75 0.73 0.71"
+             mark="edge" markrgb="0.70 0.68 0.66"/>
+    <material name="carrelage" texture="carrelage_tex" texrepeat="30 30"
+              specular="0.4" shininess="0.3" reflectance="0.1"/>
+
+    <!-- Wall / furniture materials -->
+    <material name="mur" rgba="0.92 0.90 0.87 1" specular="0.1" shininess="0.05"/>
+    <material name="mur_cuisine" rgba="0.88 0.90 0.85 1" specular="0.15" shininess="0.1"/>
+    <material name="mur_sdb" rgba="0.85 0.90 0.92 1" specular="0.2" shininess="0.15"/>
+    <material name="bois_fonce" rgba="0.35 0.22 0.12 1" specular="0.3" shininess="0.2"/>
+    <material name="bois_clair" rgba="0.72 0.58 0.40 1" specular="0.25" shininess="0.15"/>
+    <material name="tissu" rgba="0.30 0.35 0.50 1" specular="0.05" shininess="0.02"/>
+    <material name="tissu_vert" rgba="0.25 0.45 0.30 1" specular="0.05" shininess="0.02"/>
+    <material name="metal" rgba="0.70 0.72 0.75 1" specular="0.7" shininess="0.5"/>
+    <material name="plastique" rgba="0.15 0.15 0.18 1" specular="0.3" shininess="0.2"/>
+    <material name="ceramique" rgba="0.95 0.93 0.90 1" specular="0.5" shininess="0.4"/>
+    <material name="tapis" rgba="0.60 0.20 0.15 1" specular="0.02" shininess="0.01"/>
+    <material name="pot" rgba="0.65 0.35 0.20 1" specular="0.2" shininess="0.1"/>
+    <material name="start_zone" rgba="0.2 0.8 0.3 0.3" specular="0" shininess="0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Lighting — one per room -->
+    <light pos="1.00 -0.25 2.0" dir="0 0 -1" diffuse="0.70 0.65 0.55" castshadow="true"/>
+    <light pos="3.85 -0.25 2.0" dir="0 0 -1" diffuse="0.65 0.65 0.60" castshadow="true"/>
+    <light pos="5.85 -0.25 2.0" dir="0 0 -1" diffuse="0.60 0.60 0.65" castshadow="false"/>
+    <light pos="3.00  1.60 2.0" dir="0 0 -1" diffuse="0.50 0.50 0.50" castshadow="false"/>
+    <light pos="3.00  3.70 2.0" dir="0 0 -1" diffuse="0.70 0.65 0.55" castshadow="true"/>
+
+    <!-- ============================================================
+         FLOOR
+         ============================================================ -->
+    <geom name="floor" type="plane" size="10 10 0.05" material="parquet"
+          contype="1" conaffinity="1"/>
+
+    <!-- Carrelage overlays: cuisine + SDB -->
+    <geom name="floor_cuisine" type="box" size="1.25 1.25 0.001"
+          pos="3.85 -0.25 0.001" material="carrelage"
+          contype="1" conaffinity="1"/>
+    <geom name="floor_sdb" type="box" size="0.65 1.25 0.001"
+          pos="5.85 -0.25 0.001" material="carrelage"
+          contype="1" conaffinity="1"/>
+
+    <!-- Robot start zone -->
+    <geom type="box" size="0.15 0.15 0.0005" pos="0.50 -0.25 0.002"
+          material="start_zone" contype="0" conaffinity="0"/>
+
+
+    <!-- ============================================================
+         EXTERIOR WALLS
+         ============================================================ -->
+
+    <!-- West wall: X=-0.55, Y from -1.55 to 5.25 -->
+    <geom name="wall_W" type="box" size="0.05 3.40 0.20"
+          pos="-0.55 1.85 0.20" material="mur"/>
+
+    <!-- East wall: X=6.55, Y from -1.55 to 5.25 -->
+    <geom name="wall_E" type="box" size="0.05 3.40 0.20"
+          pos="6.55 1.85 0.20" material="mur"/>
+
+    <!-- South wall: Y=-1.55, X from -0.55 to 6.55 -->
+    <geom name="wall_S" type="box" size="3.55 0.05 0.20"
+          pos="3.00 -1.55 0.20" material="mur"/>
+
+    <!-- North wall: Y=5.25, X from -0.55 to 6.55 -->
+    <geom name="wall_N" type="box" size="3.55 0.05 0.20"
+          pos="3.00 5.25 0.20" material="mur"/>
+
+
+    <!-- ============================================================
+         INTERIOR WALLS — SOUTH ROW (Y=1.05, corridor south side)
+         Door openings: salon [0.55-1.35], cuisine [3.35-4.15], SDB [5.55-6.35]
+         ============================================================ -->
+
+    <!-- Segment 1: X from -0.55 to 0.55 (west of salon door) -->
+    <geom name="wall_cor_S1" type="box" size="0.55 0.05 0.20"
+          pos="0.00 1.05 0.20" material="mur"/>
+
+    <!-- SALON DOOR: X [0.55 to 1.35] = 0.80m -->
+
+    <!-- Segment 2: X from 1.35 to 3.35 (between salon and cuisine doors) -->
+    <geom name="wall_cor_S2" type="box" size="1.00 0.05 0.20"
+          pos="2.35 1.05 0.20" material="mur"/>
+
+    <!-- CUISINE DOOR: X [3.35 to 4.15] = 0.80m -->
+
+    <!-- Segment 3: X from 4.15 to 5.55 (between cuisine and SDB doors) -->
+    <geom name="wall_cor_S3" type="box" size="0.70 0.05 0.20"
+          pos="4.85 1.05 0.20" material="mur"/>
+
+    <!-- SDB DOOR: X [5.55 to 6.35] = 0.80m -->
+
+    <!-- Segment 4: X from 6.35 to 6.55 (east of SDB door) -->
+    <geom name="wall_cor_S4" type="box" size="0.10 0.05 0.20"
+          pos="6.45 1.05 0.20" material="mur"/>
+
+
+    <!-- ============================================================
+         INTERIOR WALLS — NORTH ROW (Y=2.15, corridor north side)
+         Door opening: chambre [1.50-2.30]
+         ============================================================ -->
+
+    <!-- Segment left: X from -0.55 to 1.50 -->
+    <geom name="wall_cor_N1" type="box" size="1.025 0.05 0.20"
+          pos="0.475 2.15 0.20" material="mur"/>
+
+    <!-- CHAMBRE DOOR: X [1.50 to 2.30] = 0.80m -->
+
+    <!-- Segment right: X from 2.30 to 6.55 -->
+    <geom name="wall_cor_N2" type="box" size="2.125 0.05 0.20"
+          pos="4.425 2.15 0.20" material="mur"/>
+
+
+    <!-- ============================================================
+         INTERIOR WALLS — VERTICAL DIVIDERS
+         ============================================================ -->
+
+    <!-- Salon ↔ Cuisine wall (X=2.55, from Y=-1.55 to Y=1.05)
+         Door opening: Y [-0.40 to 0.40] = 0.80m -->
+
+    <!-- Bottom segment: Y from -1.55 to -0.40 -->
+    <geom name="wall_sal_cui_B" type="box" size="0.05 0.575 0.20"
+          pos="2.55 -0.975 0.20" material="mur"/>
+
+    <!-- Top segment: Y from 0.40 to 1.05 -->
+    <geom name="wall_sal_cui_T" type="box" size="0.05 0.325 0.20"
+          pos="2.55 0.725 0.20" material="mur"/>
+
+
+    <!-- Cuisine ↔ SDB wall (X=5.15, from Y=-1.55 to Y=1.05)
+         Door opening: Y [-0.40 to 0.40] = 0.80m -->
+
+    <!-- Bottom segment: Y from -1.55 to -0.40 -->
+    <geom name="wall_cui_sdb_B" type="box" size="0.05 0.575 0.20"
+          pos="5.15 -0.975 0.20" material="mur_sdb"/>
+
+    <!-- Top segment: Y from 0.40 to 1.05 -->
+    <geom name="wall_cui_sdb_T" type="box" size="0.05 0.325 0.20"
+          pos="5.15 0.725 0.20" material="mur_sdb"/>
+
+
+    <!-- ============================================================
+         SALON (3.00 × 2.50m) — X[-0.50, 2.50] × Y[-1.50, 1.00]
+         Robot spawns at (0.50, -0.25).
+         ============================================================ -->
+
+    <!-- Canapé — 1.60m × 0.70m, against south wall
+         Assise: pos Y_center = -1.50 + 0.35 = -1.15
+         Y extent: [-1.50, -0.80]
+         Gap to table basse pieds (Y=-0.10): 0.80-0.10 = 0.70m ✓ -->
+    <!-- Canapé shifted west so east edge (X=2.10) leaves 40cm to salon/cuisine wall (X=2.50) -->
+    <geom name="canape_assise" type="box" size="0.80 0.35 0.08"
+          pos="1.30 -1.15 0.08" material="tissu"
+          friction="0.8 0.005 0.001"/>
+    <geom name="canape_dossier" type="box" size="0.80 0.06 0.15"
+          pos="1.30 -1.44 0.23" material="tissu"/>
+
+    <!-- Table basse — 0.90 × 0.50m, h=0.35m, centered in salon
+         Pieds at: X[0.65,1.75] × Y[-0.10,0.40]  (closest to canapé: Y=-0.10)
+         Gap canapé→table: -0.80 - (-0.10) = 0.70m ✓
+         Gap table pied west (X=0.65) → west wall (-0.50): 1.15m ✓
+         Gap table pied east (X=1.75) → salon/cuisine wall (2.50): 0.75m ✓ -->
+    <geom name="table_basse_plateau" type="box" size="0.45 0.25 0.015"
+          pos="1.20 0.15 0.34" material="bois_clair"
+          contype="0" conaffinity="0"/>
+    <geom name="table_basse_p1" type="cylinder" size="0.02 0.165"
+          pos="0.80 0.35 0.165" material="metal"/>
+    <geom name="table_basse_p2" type="cylinder" size="0.02 0.165"
+          pos="1.60 0.35 0.165" material="metal"/>
+    <geom name="table_basse_p3" type="cylinder" size="0.02 0.165"
+          pos="0.80 -0.05 0.165" material="metal"/>
+    <geom name="table_basse_p4" type="cylinder" size="0.02 0.165"
+          pos="1.60 -0.05 0.165" material="metal"/>
+
+    <!-- Tapis sous table basse — visual only, not a physical barrier for large wheels -->
+    <geom name="tapis_salon" type="box" size="0.65 0.45 0.001"
+          pos="1.20 0.15 0.001" material="tapis"
+          contype="0" conaffinity="0"/>
+
+    <!-- Meuble TV — 1.20 × 0.35m, against west wall mid-height
+         X_center = -0.50 + 0.175 = -0.325. But let's place along Y=-0.80 to avoid blocking.
+         Actually, along the west wall facing east.
+         pos: X = -0.50 + 0.175 = -0.32, Y = 0.00
+         X extent: [-0.50, -0.15]  Y extent: [-0.60, 0.60]
+         Gap TV east edge (X=-0.15) → table pied west (X=0.80): 0.95m ✓
+         Gap TV Y_max (0.60) → corridor wall (1.00): 0.40m ✓ -->
+    <geom name="meuble_tv" type="box" size="0.175 0.60 0.20"
+          pos="-0.32 0.00 0.20" material="bois_fonce"/>
+
+    <!-- Plante en pot — against east wall of salon, near door
+         pos: X=2.15, Y=0.70. Radius=0.12
+         Gap to salon/cuisine wall (X=2.50): 2.50-(2.15+0.12) = 0.23m — hmm a bit tight
+         Move to X=2.00: gap = 2.50-(2.00+0.12) = 0.38m ✓
+         Gap to corridor wall (Y=1.00): 1.00-(0.70+0.12) = 0.18m — too tight
+         Move to Y=0.40: gap = 1.00-(0.40+0.12) = 0.48m ✓ -->
+    <!-- Pot moved to X=2.15 for 41cm gap to nearest table pied (X=1.62) -->
+    <geom name="pot_plante" type="cylinder" size="0.12 0.15"
+          pos="2.15 0.10 0.15" material="pot"/>
+
+    <!-- Lampe sur pied — near north-west, away from walls
+         pos: X=0.20, Y=0.70
+         Gap to west wall (-0.50): 0.20-0.12-(-0.50) = 0.58m (base radius=0.10) ✓
+         Gap to corridor wall (1.00): 1.00-(0.70+0.10) = 0.20m — move to Y=0.50
+         Gap = 1.00-(0.50+0.10) = 0.40m ✓ -->
+    <!-- Lampe moved to X=0.45 for 40cm+ gap to meuble TV (X_max=-0.15) -->
+    <geom name="lampe_pied" type="cylinder" size="0.015 0.30"
+          pos="0.45 0.50 0.30" material="metal"/>
+    <geom name="lampe_base" type="cylinder" size="0.10 0.01"
+          pos="0.45 0.50 0.01" material="metal"/>
+
+    <!-- Chaussures — small low obstacles near corridor door
+         Near X=0.95, Y=0.75 (approaching the door at X[0.55-1.35], Y=1.00)
+         Small enough to go around -->
+    <geom name="chaussure_1" type="box" size="0.05 0.035 0.03"
+          pos="0.70 0.75 0.03" material="plastique" euler="0 0 0.3"/>
+    <geom name="chaussure_2" type="box" size="0.05 0.035 0.03"
+          pos="0.85 0.85 0.03" material="plastique" euler="0 0 -0.2"/>
+
+
+    <!-- ============================================================
+         COULOIR (7.00 × 1.00m) — X[-0.50, 6.50] × Y[1.10, 2.10]
+         ============================================================ -->
+
+    <!-- Paillasson — flat (5mm), robot rolls over, near cuisine door
+         Door at X[3.35-4.15] -->
+    <geom name="paillasson" type="box" size="0.25 0.20 0.001"
+          pos="3.75 1.60 0.001" material="tapis"
+          contype="0" conaffinity="0"/>
+
+    <!-- Small shoe in corridor — low obstacle, doesn't block -->
+    <geom name="chaussure_couloir" type="box" size="0.05 0.035 0.03"
+          pos="1.00 1.55 0.03" material="plastique" euler="0 0 0.5"/>
+
+    <!-- ★ CHALLENGE PASSAGE ★ — Carton/box narrowing the corridor to ~30cm
+         Corridor width = 1.00m (Y: 1.10 to 2.10). Box against north wall.
+         Box: 0.40m × 0.35m. pos Y = 2.10 - 0.175 = 1.925
+         Y extent: [1.75, 2.10]. Remaining gap: 1.75 - 1.10 = 0.65m... too wide.
+         Make box wider (Y): 0.65m deep. pos Y = 2.10 - 0.325 = 1.775
+         Y extent: [1.45, 2.10]. Gap: 1.45 - 1.10 = 0.35m → just passable.
+         Actually user wants ~30cm: make it 0.70m deep.
+         pos Y = 2.10 - 0.35 = 1.75. Y extent: [1.40, 2.10]. Gap = 0.30m.
+         pos X = 5.00 (far end of corridor, before SDB door) -->
+    <geom name="carton_challenge" type="box" size="0.20 0.35 0.12"
+          pos="5.00 1.75 0.12" material="bois_clair"/>
+
+
+    <!-- ============================================================
+         CUISINE (2.50 × 2.50m) — X[2.60, 5.10] × Y[-1.50, 1.00]
+         ============================================================ -->
+
+    <!-- Comptoir — along south wall, 2.00m × 0.60m, h=0.90m
+         pos: X=3.60, Y=-1.50+0.30=-1.20
+         Y extent: [-1.50, -0.90]
+         Gap north of comptoir to table: -0.90 - (-0.40) = needs check per table position -->
+    <geom name="comptoir" type="box" size="1.00 0.30 0.45"
+          pos="3.60 -1.20 0.45" material="ceramique"/>
+
+    <!-- Table cuisine — 1.00 × 0.60m, h=0.75m, centered
+         pos: X=3.85, Y=-0.10
+         Pieds at X[3.40, 4.30] × Y[-0.35, 0.15]
+         Gap pied south (Y=-0.35) → comptoir north (Y=-0.90): 0.55m ✓
+         Gap pied east (X=4.30) → cuisine east wall (5.10): 0.80m ✓
+         Gap pied west (X=3.40) → salon/cuisine wall (2.60): 0.80m ✓
+         Gap pied north (Y=0.15) → corridor wall (1.00): 0.85m ✓ -->
+    <geom name="table_cuisine_plateau" type="box" size="0.50 0.30 0.02"
+          pos="3.85 -0.10 0.74" material="bois_clair"
+          contype="0" conaffinity="0"/>
+    <geom name="table_cui_p1" type="cylinder" size="0.02 0.36"
+          pos="3.40 0.15 0.36" material="metal"/>
+    <geom name="table_cui_p2" type="cylinder" size="0.02 0.36"
+          pos="4.30 0.15 0.36" material="metal"/>
+    <geom name="table_cui_p3" type="cylinder" size="0.02 0.36"
+          pos="3.40 -0.35 0.36" material="metal"/>
+    <geom name="table_cui_p4" type="cylinder" size="0.02 0.36"
+          pos="4.30 -0.35 0.36" material="metal"/>
+
+    <!-- Chaises — pieds seulement, 2 chaises each side of table
+         Chaise 1 (west): X=3.00. Pieds at Y[-0.30, 0.10]
+         Gap to salon/cuisine wall (X=2.60): 3.00-0.015-2.60 = 0.385m ✓ -->
+    <geom name="chaise1_p1" type="cylinder" size="0.015 0.22"
+          pos="3.00 0.10 0.22" material="metal"/>
+    <geom name="chaise1_p2" type="cylinder" size="0.015 0.22"
+          pos="3.00 -0.30 0.22" material="metal"/>
+    <!-- Chaise 2 (east): X=4.70.
+         Gap to cuisine/SDB wall (X=5.10): 5.10-(4.70+0.015) = 0.385m ✓ -->
+    <geom name="chaise2_p1" type="cylinder" size="0.015 0.22"
+          pos="4.70 0.10 0.22" material="metal"/>
+    <geom name="chaise2_p2" type="cylinder" size="0.015 0.22"
+          pos="4.70 -0.30 0.22" material="metal"/>
+
+    <!-- Poubelle — cylinder against east wall
+         pos: X=4.80, Y=-1.10, radius=0.12
+         Gap to cuisine/SDB wall (X=5.10): 5.10-(4.80+0.12) = 0.18m — tight
+         Move to X=4.60: gap = 5.10-(4.60+0.12) = 0.38m ✓
+         Gap to south wall (Y=-1.50): -1.50-(-1.10-0.12) = 0.28m — OK not a passage -->
+    <!-- Poubelle moved north for 48cm gap to south wall (Y=-1.50) -->
+    <geom name="poubelle" type="cylinder" size="0.12 0.18"
+          pos="4.60 -0.90 0.18" material="plastique"/>
+
+    <!-- Bouteille d'eau au sol — tiny obstacle -->
+    <!-- Bouteille against cuisine/SDB wall, outside comptoir X shadow -->
+    <geom name="bouteille" type="cylinder" size="0.04 0.12"
+          pos="5.05 -1.30 0.12" material="plastique"/>
+
+    <!-- Tapis cuisine — visual only -->
+    <geom name="tapis_cuisine" type="box" size="0.30 0.20 0.001"
+          pos="3.60 -0.70 0.001" material="tapis"
+          contype="0" conaffinity="0"/>
+
+
+    <!-- ============================================================
+         CHAMBRE (7.00 × 3.00m) — X[-0.50, 6.50] × Y[2.20, 5.20]
+         ============================================================ -->
+
+    <!-- Lit — 2.00 × 1.40m, against north wall, left side
+         Sommier: pos X=1.50, Y=5.20-0.70=4.50
+         Y extent: [3.80, 5.20]. X extent: [0.50, 2.50]
+         Gap south of lit (Y=3.80) → chambre south wall (Y=2.20): 1.60m ✓
+         Gap east of lit (X=2.50) → chevet: need space -->
+    <geom name="lit_sommier" type="box" size="1.00 0.70 0.125"
+          pos="1.50 4.50 0.125" material="bois_fonce"/>
+    <geom name="lit_matelas" type="box" size="0.95 0.68 0.075"
+          pos="1.50 4.50 0.325" material="tissu"
+          contype="0" conaffinity="0"/>
+
+    <!-- Table de chevet — 0.40 × 0.40m, h=0.55m, next to lit
+         pos: X=2.90, Y=4.80
+         Gap to lit (X=2.50): 2.90-0.20-2.50 = 0.20m — too tight for passage, but it's
+         not a passage (against wall). Gap south of chevet (Y=4.80-0.20=4.60) → open: OK -->
+    <geom name="chevet" type="box" size="0.20 0.20 0.275"
+          pos="2.90 4.80 0.275" material="bois_clair"/>
+
+    <!-- Armoire — 1.80 × 0.60m, against east wall
+         pos: X=6.50-0.30=6.20, Y=4.00
+         X extent: [5.30, 6.50] (against east wall ✓)
+         Gap west of armoire (X=5.30) → open room: plenty of space
+         Gap south of armoire (Y=4.00-0.90=3.10) → south wall (2.20): 0.90m ✓ -->
+    <geom name="armoire" type="box" size="0.30 0.90 0.20"
+          pos="6.20 4.00 0.20" material="bois_fonce"/>
+
+    <!-- Tapis chambre — visual only -->
+    <geom name="tapis_chambre" type="box" size="0.60 0.40 0.001"
+          pos="1.50 3.50 0.001" material="tapis"
+          contype="0" conaffinity="0"/>
+
+    <!-- Chaussons — low obstacles near bed -->
+    <geom name="chausson_1" type="box" size="0.045 0.03 0.02"
+          pos="2.60 3.40 0.02" material="tissu" euler="0 0 0.5"/>
+    <geom name="chausson_2" type="box" size="0.045 0.03 0.02"
+          pos="2.75 3.30 0.02" material="tissu" euler="0 0 -0.3"/>
+
+    <!-- Câble chargeur au sol — very thin, very low -->
+    <geom name="cable" type="capsule" size="0.005 0.40"
+          pos="3.20 4.80 0.005" euler="0 1.5708 0.2"
+          material="plastique"/>
+
+    <!-- Livre tombé au sol -->
+    <geom name="livre" type="box" size="0.11 0.08 0.012"
+          pos="4.00 3.00 0.012" material="bois_clair" euler="0 0 0.7"/>
+
+    <!-- Bureau — 1.20 × 0.60m, right side of chambre
+         pos: X=4.80, Y=5.20-0.30=4.90
+         Y extent: [4.30, 5.20] (against north wall)
+         Gap south (Y=4.30) → open: plenty -->
+    <geom name="bureau" type="box" size="0.60 0.30 0.20"
+          pos="4.80 4.90 0.20" material="bois_clair"/>
+
+    <!-- Chaise bureau — single chair
+         pos: X=4.80, Y=4.10
+         Gap to bureau (Y=4.30): 4.30-(4.10+0.015) = 0.175m — not a passage, functional gap
+         Gap south (Y=4.10-0.015=4.085) → livre (Y=3.00): 1.08m ✓ -->
+    <geom name="chaise_bureau_p1" type="cylinder" size="0.015 0.22"
+          pos="4.55 4.10 0.22" material="metal"/>
+    <geom name="chaise_bureau_p2" type="cylinder" size="0.015 0.22"
+          pos="5.05 4.10 0.22" material="metal"/>
+
+
+    <!-- ============================================================
+         SALLE DE BAIN (1.30 × 2.50m) — X[5.20, 6.50] × Y[-1.50, 1.00]
+         ============================================================ -->
+
+    <!-- Meuble vasque — 0.70 × 0.40m, against east wall
+         pos: X=6.50-0.20=6.30, Y=-0.30
+         Gap west of vasque (X=6.30-0.20=6.10) → SDB west wall (5.20): 0.90m ✓ -->
+    <geom name="vasque" type="box" size="0.20 0.35 0.20"
+          pos="6.30 -0.30 0.20" material="ceramique"/>
+
+    <!-- Douche — bac au sol with rebord, in south end
+         pos: X=5.85, Y=-1.15
+         Bac Y extent: [-1.50, -0.80]. Rebord at Y=-0.80. -->
+    <geom name="douche_bac" type="box" size="0.40 0.35 0.04"
+          pos="5.85 -1.15 0.04" material="ceramique"/>
+    <geom name="douche_rebord" type="box" size="0.40 0.02 0.07"
+          pos="5.85 -0.78 0.07" material="ceramique"/>
+
+    <!-- Panier à linge — in corner
+         pos: X=5.50, Y=0.60, radius=0.13
+         Gap to west wall (5.20): 5.50-0.13-5.20 = 0.17m — against wall, not a passage
+         Gap to corridor wall (Y=1.00): 1.00-(0.60+0.13) = 0.27m — not a main passage either
+         Gap south (Y=0.60-0.13=0.47) → vasque (Y=-0.30+0.35=0.05): 0.42m ✓ -->
+    <geom name="panier_linge" type="cylinder" size="0.13 0.20"
+          pos="5.50 0.60 0.20" material="tissu_vert"/>
+
+    <!-- Tapis de bain — visual only -->
+    <geom name="tapis_sdb" type="box" size="0.20 0.15 0.001"
+          pos="5.85 -0.50 0.001" material="tapis"
+          contype="0" conaffinity="0"/>
+
+    <!-- Pèse-personne — flat obstacle -->
+    <geom name="pese_personne" type="box" size="0.15 0.15 0.015"
+          pos="6.20 0.50 0.015" material="plastique"/>
+
+  </worldbody>
+</mujoco>
