@@ -65,7 +65,7 @@ def main():
     nav.set_heading(0.0)
     print()
     print("tick  t    x     y     h      d_front fsm           side bias    "
-          "rf_FL rf_FC rf_FR")
+          "rf_FL rf_C  rf_FR")
     print("-" * 98)
 
     sim_t = 0.0
@@ -97,7 +97,7 @@ def main():
         event = (side != prev_side) or (fsm != prev_fsm)
         if event or sim_t >= next_log:
             rf_FL = nav._rf_compensated.get("rf_FL", -1.0)
-            rf_FC = nav._rf_compensated.get("rf_FC", -1.0)
+            rf_FC = nav._rf_compensated.get("rf_C", -1.0)
             rf_FR = nav._rf_compensated.get("rf_FR", -1.0)
             side_s = "--" if side is None else f"{side:+d}"
             print(f"{int(sim_t/dt):4d} {sim_t:5.2f} "

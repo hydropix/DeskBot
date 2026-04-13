@@ -48,12 +48,9 @@ def save_grid_snapshot(navigator, episode, timestep, output_dir="snapshots"):
              head_width=0.05, head_length=0.05, fc='cyan', ec='cyan', 
              linestyle='--', alpha=0.7, label='Target')
     
-    # Capteurs
-    rf_angles = {
-        "rf_FC": 0.0, "rf_FL": math.radians(30), "rf_FR": math.radians(-30),
-        "rf_FL2": math.radians(55), "rf_FR2": math.radians(-55),
-        "rf_SL": math.radians(90), "rf_SR": math.radians(-90),
-    }
+    # Capteurs — import the canonical angle table from navigation so this
+    # diagnostic tracks the live 10-sensor fovea layout automatically.
+    from deskbot.navigation import RF_BODY_ANGLES as rf_angles
     
     for name, dist in navigator._rf_compensated.items():
         angle = rf_angles.get(name, 0) + heading

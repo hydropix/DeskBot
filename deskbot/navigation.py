@@ -51,13 +51,21 @@ from deskbot.early_avoidance import (
 # only used as a coarse angular index — precise ray directions come from
 # GroundGeometry at runtime.
 RF_BODY_ANGLES = {
-    "rf_FC":  0.0,
-    "rf_FL":  math.radians(30),
-    "rf_FR":  math.radians(-30),
-    "rf_FL2": math.radians(55),
-    "rf_FR2": math.radians(-55),
+    # Fovea: 3 parallel forward beams (all 0° azimuth).
+    "rf_C":   0.0,
+    "rf_FL":  0.0,
+    "rf_FR":  0.0,
+    # Mid-forward ±25°.
+    "rf_L":   math.radians(25),
+    "rf_R":   math.radians(-25),
+    # Wide-forward ±55°.
+    "rf_WL":  math.radians(55),
+    "rf_WR":  math.radians(-55),
+    # Pure side ±90°.
     "rf_SL":  math.radians(90),
     "rf_SR":  math.radians(-90),
+    # Rear 180°.
+    "rf_B":   math.radians(180),
 }
 
 
@@ -649,7 +657,10 @@ class Navigator:
         rf = self.compensate_rangefinders(readings.rangefinders, estimator.pitch)
         self._rf_compensated = rf
 
-        front_names = ("rf_FC", "rf_FL", "rf_FR")
+        # Front safety cone: 3 parallel fovea beams + mid-forward ±25°.
+        # Covers roughly the same 60° frontal cone as the legacy
+        # (rf_FC, rf_FL@±30°, rf_FR@±30°) triple.
+        front_names = ("rf_C", "rf_FL", "rf_FR", "rf_L", "rf_R")
         front_dists = [rf[n] for n in front_names if rf.get(n, -1) > 0]
         self._min_front_dist = min(front_dists) if front_dists else 999.0
         self.state.min_front_dist = self._min_front_dist
@@ -917,8 +928,11 @@ class Navigator:
                 best_score = score
                 best_angle_deg = deg_offset
 
-        fl = rf.get("rf_FL", -1.0)
-        fr = rf.get("rf_FR", -1.0)
+        # Left/right clearance bias from the ±25° mid-forward beams.
+        # rf_FL/rf_FR are parallel in the new fovea layout and cannot be
+        # used as a left-vs-right discriminator — use rf_L / rf_R instead.
+        fl = rf.get("rf_L", -1.0)
+        fr = rf.get("rf_R", -1.0)
         fl_val = fl if fl > 0 else 0.0
         fr_val = fr if fr > 0 else 0.0
         sensor_bias = fl_val - fr_val  # positive = left is clearer

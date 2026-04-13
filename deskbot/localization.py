@@ -224,27 +224,31 @@ class HeadingCorrector:
 
         Returns (correction_radians, is_valid).
         """
-        # Check side sensors for wall parallelism
+        # Check side sensors for wall parallelism.
+        # The 10-sensor fovea layout provides two left-side beams (SL@90°,
+        # WL@55°) and two right-side beams (SR@-90°, WR@-55°). We use the
+        # 90° + 55° pair on each side to detect wall parallelism via a
+        # ratio consistency check — equivalent to the old SL/FL2 pair.
         sl = rf_compensated.get("rf_SL", -1.0)
         sr = rf_compensated.get("rf_SR", -1.0)
-        fl2 = rf_compensated.get("rf_FL2", -1.0)
-        fr2 = rf_compensated.get("rf_FR2", -1.0)
+        wl = rf_compensated.get("rf_WL", -1.0)
+        wr = rf_compensated.get("rf_WR", -1.0)
 
         wall_detected = False
         detected_wall_angle = 0.0
 
-        # Left wall: SL + FL2 readings indicate a wall on the left
-        if sl > 0 and fl2 > 0:
+        # Left wall: SL + WL readings indicate a wall on the left
+        if sl > 0 and wl > 0:
             # If both readings are similar (within 30%), we're roughly parallel
-            ratio = sl / fl2 if fl2 > 0.01 else 999.0
+            ratio = sl / wl if wl > 0.01 else 999.0
             if 0.6 < ratio < 1.6:
                 # Wall is at heading + 90 degrees
                 detected_wall_angle = heading + math.pi / 2
                 wall_detected = True
 
         # Right wall (same logic)
-        if not wall_detected and sr > 0 and fr2 > 0:
-            ratio = sr / fr2 if fr2 > 0.01 else 999.0
+        if not wall_detected and sr > 0 and wr > 0:
+            ratio = sr / wr if wr > 0.01 else 999.0
             if 0.6 < ratio < 1.6:
                 detected_wall_angle = heading - math.pi / 2
                 wall_detected = True

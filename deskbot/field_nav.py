@@ -27,26 +27,48 @@ class FieldParams:
     nudge_decay: float = 0.95     # Décroissance du nudge (mémorise le choix)
 
 
-# Angles des lasers dans le repère robot (radians)
+# Angles des lasers dans le repère robot (radians).
+# 10-sensor foveal layout: 3 parallel forward beams (fovea), then a
+# log-spaced spread to the sides and one rear beam.
 RF_ANGLES = {
-    "rf_FC":  0.0,
-    "rf_FL":  math.radians(30),
-    "rf_FR":  math.radians(-30),
-    "rf_FL2": math.radians(55),
-    "rf_FR2": math.radians(-55),
+    # Fovea (3 parallel forward beams)
+    "rf_C":   0.0,
+    "rf_FL":  0.0,
+    "rf_FR":  0.0,
+    # Mid-forward ±25°
+    "rf_L":   math.radians(25),
+    "rf_R":   math.radians(-25),
+    # Wide-forward ±55°
+    "rf_WL":  math.radians(55),
+    "rf_WR":  math.radians(-55),
+    # Pure side ±90°
     "rf_SL":  math.radians(90),
     "rf_SR":  math.radians(-90),
+    # Rear 180°
+    "rf_B":   math.radians(180),
 }
 
-# Poids relatifs des capteurs (frontaux plus importants pour l'évitement)
+# Poids relatifs des capteurs (frontaux plus importants pour l'évitement).
+# La fovée concentre la densité sur l'axe de marche, donc chaque beam
+# reçoit un poids un peu plus faible (somme totale ≈ celle de l'ancien
+# rf_FC avec ses voisins), pour éviter que le champ répulsif soit
+# sur-pondéré dès qu'un obstacle apparaît droit devant.
 RF_WEIGHTS = {
-    "rf_FC":  2.0,   # Front central: priorité max
-    "rf_FL":  1.5,
-    "rf_FR":  1.5,
-    "rf_FL2": 1.0,
-    "rf_FR2": 1.0,
-    "rf_SL":  0.5,   # Latéraux: moins prioritaires
+    # Fovea: 3 parallel beams, total fovea weight ≈ 3.6
+    "rf_C":   1.5,
+    "rf_FL":  1.1,
+    "rf_FR":  1.1,
+    # Mid-forward
+    "rf_L":   1.3,
+    "rf_R":   1.3,
+    # Wide-forward
+    "rf_WL":  0.9,
+    "rf_WR":  0.9,
+    # Pure side (corridor following, low priority for repulsion)
+    "rf_SL":  0.5,
     "rf_SR":  0.5,
+    # Rear: only matters when reversing — keep low for forward motion
+    "rf_B":   0.3,
 }
 
 
@@ -147,12 +169,15 @@ class FieldNavigator:
         Ajoute un "nudge" latéral aléatoire qui persiste pour éviter
         l'hésitation entre gauche et droite.
         """
-        fc_dist = rf.get("rf_FC", -1)
-        
+        fc_dist = rf.get("rf_C", -1)
+
         # Si obstacle frontal proche et pas de latéraux détectés
         if 0 < fc_dist < 0.8:
-            fl_dist = rf.get("rf_FL", 999)
-            fr_dist = rf.get("rf_FR", 999)
+            # rf_FL/rf_FR are parallel fovea beams in the new layout —
+            # useless for left/right symmetry breaking. The ±25° mid
+            # beams (rf_L / rf_R) are the meaningful asymmetry signal.
+            fl_dist = rf.get("rf_L", 999)
+            fr_dist = rf.get("rf_R", 999)
             
             # Symétrie: choisir un côté si pas évident
             if abs(fl_dist - fr_dist) < 0.3:
@@ -214,8 +239,8 @@ class FieldNavigator:
         # Yaw = composante latérale de la force + nudge
         yaw_cmd = total_force[1] + nudge
         
-        # Vitesse: réduite si obstacle frontal
-        fc_dist = rf.get("rf_FC", 999)
+        # Vitesse: réduite si obstacle frontal (sonde la fovée centrale).
+        fc_dist = rf.get("rf_C", 999)
         vel_scale = 1.0
         if 0 < fc_dist < 1.0:
             vel_scale = min(1.0, fc_dist / 0.6)  # Ralentit sous 60cm

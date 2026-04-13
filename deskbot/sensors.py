@@ -25,7 +25,27 @@ ENCODER_TICKS_PER_REV = 1440      # 360-line encoder with 4x quadrature decoding
 TICK_SIZE = 2 * math.pi / ENCODER_TICKS_PER_REV  # rad per tick
 
 # ── Rangefinder parameters (VL53L0X) ──────────────────────────────
-RF_NAMES = ["rf_FC", "rf_FL", "rf_FR", "rf_FL2", "rf_FR2", "rf_SL", "rf_SR"]
+# 10-sensor foveal array, wired through 2× TCA9548A I²C multiplexers.
+# Order below follows the azimuth sweep (−180° → +180°) for readability
+# only — the code never assumes any ordering.
+#
+#   fovea (3 parallel beams covering the robot's straight-ahead column):
+#       rf_C, rf_FL, rf_FR
+#   mid-forward ±25°:
+#       rf_L, rf_R
+#   wide-forward ±55°:
+#       rf_WL, rf_WR
+#   pure side ±90° (corridor tracking):
+#       rf_SL, rf_SR
+#   rear 180°:
+#       rf_B
+RF_NAMES = [
+    "rf_C", "rf_FL", "rf_FR",
+    "rf_L", "rf_R",
+    "rf_WL", "rf_WR",
+    "rf_SL", "rf_SR",
+    "rf_B",
+]
 RF_MAX_RANGE = 2.0        # meters (cutoff in MJCF)
 RF_NOISE_SIGMA = 0.005    # 5mm gaussian noise
 RF_NOISE_PERCENT = 0.03   # 3% of reading

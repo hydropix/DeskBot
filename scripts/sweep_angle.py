@@ -20,13 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deskbot.robot import MODELS_DIR
 from deskbot.sensors import SensorModel
 from deskbot.control import BalanceController, StateEstimator
-from deskbot.navigation import Navigator, RF_BODY_ANGLES, RF_PITCH_FACTOR
+from deskbot.navigation import Navigator, RF_BODY_ANGLES
 import deskbot.navigation as nav_mod
 from scripts.benchmark_random import random_obstacles, generate_scene_xml, run_episode
 
 
+# In the 10-sensor fovea layout, rf_FL2/rf_FR2 became rf_WL/rf_WR (wide
+# forward) at ±55°. This sweep script now tunes the WL/WR angles.
 def patch_scene_xml_angle(base_xml: str, angle_deg: float) -> str:
-    """Replace FL2/FR2 zaxis directions in the XML for a given angle."""
+    """Replace WL/WR zaxis directions in the XML for a given angle."""
     angle_rad = math.radians(angle_deg)
     cos_a = math.cos(angle_rad)
     sin_a = math.sin(angle_rad)
@@ -39,16 +41,16 @@ def patch_scene_xml_angle(base_xml: str, angle_deg: float) -> str:
     zy_l = sin_a * cos_t
     zz = sin_t
 
-    # Replace FL2 zaxis
+    # Replace WL zaxis
     import re
     xml = re.sub(
-        r'(name="rf_FL2"[^/]*zaxis=")[^"]*(")',
+        r'(name="rf_WL"[^/]*zaxis=")[^"]*(")',
         f'\\g<1>{zx:.4f} {zy_l:.4f} {zz:.4f}\\2',
         base_xml
     )
-    # Replace FR2 zaxis
+    # Replace WR zaxis
     xml = re.sub(
-        r'(name="rf_FR2"[^/]*zaxis=")[^"]*(")',
+        r'(name="rf_WR"[^/]*zaxis=")[^"]*(")',
         f'\\g<1>{zx:.4f} {-zy_l:.4f} {zz:.4f}\\2',
         xml
     )
@@ -56,14 +58,12 @@ def patch_scene_xml_angle(base_xml: str, angle_deg: float) -> str:
 
 
 def run_sweep_at_angle(angle_deg: float, n_episodes: int, base_seed: int):
-    """Run randomized benchmark at a specific FL2/FR2 angle."""
+    """Run randomized benchmark at a specific WL/WR angle."""
 
     # Patch the navigation module's angle tables
     angle_rad = math.radians(angle_deg)
-    RF_BODY_ANGLES["rf_FL2"] = angle_rad
-    RF_BODY_ANGLES["rf_FR2"] = -angle_rad
-    RF_PITCH_FACTOR["rf_FL2"] = math.cos(angle_rad)
-    RF_PITCH_FACTOR["rf_FR2"] = math.cos(angle_rad)
+    RF_BODY_ANGLES["rf_WL"] = angle_rad
+    RF_BODY_ANGLES["rf_WR"] = -angle_rad
 
     # Read base deskbot.xml and patch it
     deskbot_xml = (MODELS_DIR / "deskbot.xml").read_text()
@@ -118,7 +118,7 @@ def run_sweep_at_angle(angle_deg: float, n_episodes: int, base_seed: int):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sweep FL2/FR2 angle")
+    parser = argparse.ArgumentParser(description="Sweep WL/WR angle")
     parser.add_argument("--episodes", type=int, default=80,
                         help="Episodes per angle (default: 80)")
     parser.add_argument("--seed", type=int, default=8000)
@@ -127,7 +127,7 @@ def main():
     angles = [45, 50, 55, 60, 65, 70, 75]
 
     print("=" * 65)
-    print(f"  FL2/FR2 ANGLE SWEEP — {args.episodes} episodes per angle")
+    print(f"  WL/WR ANGLE SWEEP — {args.episodes} episodes per angle")
     print("=" * 65)
     print()
 
@@ -139,8 +139,8 @@ def main():
         print(f"  overall={r['total']}  wall={r['wall']}  no_wall={r['no_wall']}")
 
     # Restore default angles
-    RF_BODY_ANGLES["rf_FL2"] = math.radians(60)
-    RF_BODY_ANGLES["rf_FR2"] = math.radians(-60)
+    RF_BODY_ANGLES["rf_WL"] = math.radians(55)
+    RF_BODY_ANGLES["rf_WR"] = math.radians(-55)
 
     print()
     print("=" * 65)

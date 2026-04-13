@@ -61,11 +61,15 @@
       <geom name="head" type="box" size="0.04 0.048 0.016"
             pos="0 0 0.086" mass="0.18" material="accent"/>
 
-      <!-- Sensor pod — small platform 1cm above head for VL53L0X modules.
-           Clearance: sqrt(0² + 0.112²) = 11.2cm > R=10cm → 12mm margin.
-           The pod sits just above the wheel tops. -->
-      <geom name="sensor_pod" type="box" size="0.030 0.030 0.005"
-            pos="0.005 0 0.107" mass="0.02" material="chassis"/>
+      <!-- Sensor pod — platform 1cm above head hosting 10× VL53L0X modules.
+           Enlarged (7×7cm) to fit the full fovea + peripheral + rear array.
+           Wheel clearance: sensor origins sit at Z=0.112 (local); wheel top
+           is at Z=0.10 (axle) + 0.10 (radius) = 0.20 world; chassis is at
+           Z=0.10 world, so sensor world Z = 0.212 > 0.20 → 12mm margin.
+           Lateral clearance: pod Y extent ±0.035, wheels at |Y|=0.08 →
+           45mm margin. -->
+      <geom name="sensor_pod" type="box" size="0.035 0.035 0.005"
+            pos="0 0 0.107" mass="0.02" material="chassis"/>
 
       <!-- Front screen / LED indicator -->
       <geom name="screen" type="box" size="0.001 0.035 0.030"
@@ -82,49 +86,71 @@
       <site name="cam_mount" pos="0.04 0 0.086" zaxis="1 0 0" size="0.005"
             rgba="0.2 0.2 0.2 1"/>
 
-      <!-- VL53L0X rangefinder sites.
-           FRONT (FC, FL, FR): mounted LOW on body front face (Z=-0.04,
-               6cm from ground). Mounted HORIZONTAL (0deg tilt) — the
-               robot's own pitch provides the downward tilt naturally:
-               faster → more lean → more tilt → ground scan.
-               At rest (0 pitch), sensors look straight ahead at body height
-               and detect obstacles (walls, furniture). This gives 3-4x more
-               range at speed compared to a fixed -20deg tilt.
+      <!-- VL53L0X rangefinder array — 10 sensors, all HIGH mount on pod.
+           Layout is foveal: 3 parallel beams in a dense forward cluster
+           (C, FL, FR) cover the column the robot physically sweeps while
+           going straight; peripheral beams spread out logarithmically
+           (L/R=±25°, WL/WR=±55°, SL/SR=±90°) for obstacle scanning and
+           corridor following; a single rear beam (B) watches behind.
 
-           SIDE (SL, SR): mounted HIGH on sensor pod (Z=0.112, 21cm from
-               ground). Tilted -5deg down. Side-pointing rays must clear the
-               wheel circle. Pod height guarantees 9mm+ margin.  -->
+           All beams share a -5° downward tilt so that on perfectly flat
+           ground they eventually intersect the floor well before MAX_RANGE,
+           giving GroundGeometry a flat-ground expectation for each ray.
+           Hardware mapping: 2× TCA9548A I²C multiplexers with 1 sensor
+           per channel (10 channels used out of 16). All physical modules
+           share the same VL53L0X factory address 0x29 — the mux resolves
+           the collision with zero re-addressing.
+           Tilt factor: cos(5°)=0.9962, sin(5°)=0.0872 -->
 
-      <!-- FC: front center — LOW mount, horizontal -->
-      <site name="rf_FC" pos="0.055 0 -0.04"
-            zaxis="1 0 0"
-            size="0.004" rgba="1 0.2 0.2 0.8"/>
-      <!-- FL: front-left 30deg — LOW mount, near center, horizontal -->
-      <site name="rf_FL" pos="0.055 0.015 -0.04"
-            zaxis="0.866 0.5 0"
-            size="0.004" rgba="1 0.2 0.2 0.8"/>
-      <!-- FR: front-right 30deg — LOW mount, near center, horizontal -->
-      <site name="rf_FR" pos="0.055 -0.015 -0.04"
-            zaxis="0.866 -0.5 0"
-            size="0.004" rgba="1 0.2 0.2 0.8"/>
-      <!-- FL2: front-left-wide 55deg — HIGH mount on pod, -5deg tilt
-           Optimal angle from sweep: 50-55deg range maximizes wall+gap detection.
-           cos(55°)=0.5736, sin(55°)=0.8192, with -5deg tilt applied -->
-      <site name="rf_FL2" pos="0.015 0.025 0.112"
+      <!-- ── Fovea: 3 parallel forward beams, covering the robot's width ── -->
+      <!-- C: fovea center — parallel forward, -5° tilt -->
+      <site name="rf_C"  pos="0.035  0.000 0.112"
+            zaxis="0.9962 0 -0.0872"
+            size="0.004" rgba="1 0.2 0.2 0.9"/>
+      <!-- FL: fovea left — parallel forward, offset +Y -->
+      <site name="rf_FL" pos="0.035  0.018 0.112"
+            zaxis="0.9962 0 -0.0872"
+            size="0.004" rgba="1 0.2 0.2 0.9"/>
+      <!-- FR: fovea right — parallel forward, offset -Y -->
+      <site name="rf_FR" pos="0.035 -0.018 0.112"
+            zaxis="0.9962 0 -0.0872"
+            size="0.004" rgba="1 0.2 0.2 0.9"/>
+
+      <!-- ── Mid-forward: ±25° ── -->
+      <!-- L: mid-forward-left +25° — cos25=0.9063, sin25=0.4226 -->
+      <site name="rf_L"  pos="0.028  0.030 0.112"
+            zaxis="0.9028 0.4210 -0.0872"
+            size="0.004" rgba="1 0.5 0.2 0.8"/>
+      <!-- R: mid-forward-right -25° -->
+      <site name="rf_R"  pos="0.028 -0.030 0.112"
+            zaxis="0.9028 -0.4210 -0.0872"
+            size="0.004" rgba="1 0.5 0.2 0.8"/>
+
+      <!-- ── Wide-forward: ±55° (kept from the earlier sweep optimum) ── -->
+      <!-- WL: wide-forward-left +55° — cos55=0.5736, sin55=0.8192 -->
+      <site name="rf_WL" pos="0.018  0.034 0.112"
             zaxis="0.5714 0.8161 -0.0872"
             size="0.004" rgba="1 0.6 0.2 0.8"/>
-      <!-- FR2: front-right-wide 55deg — HIGH mount on pod, -5deg tilt -->
-      <site name="rf_FR2" pos="0.015 -0.025 0.112"
+      <!-- WR: wide-forward-right -55° -->
+      <site name="rf_WR" pos="0.018 -0.034 0.112"
             zaxis="0.5714 -0.8161 -0.0872"
             size="0.004" rgba="1 0.6 0.2 0.8"/>
-      <!-- SL: side-left 90deg — HIGH mount on pod, -5deg tilt -->
-      <site name="rf_SL" pos="0.0 0.025 0.112"
+
+      <!-- ── Pure side: ±90° (corridor tracking) ── -->
+      <!-- SL: side-left +90° -->
+      <site name="rf_SL" pos="0.000  0.034 0.112"
             zaxis="0 0.9962 -0.0872"
             size="0.004" rgba="1 0.2 0.2 0.8"/>
-      <!-- SR: side-right 90deg — HIGH mount on pod, -5deg tilt -->
-      <site name="rf_SR" pos="0.0 -0.025 0.112"
+      <!-- SR: side-right -90° -->
+      <site name="rf_SR" pos="0.000 -0.034 0.112"
             zaxis="0 -0.9962 -0.0872"
             size="0.004" rgba="1 0.2 0.2 0.8"/>
+
+      <!-- ── Rear: single 180° beam ── -->
+      <!-- B: rear-center, looking backward -->
+      <site name="rf_B"  pos="-0.035 0.000 0.112"
+            zaxis="-0.9962 0 -0.0872"
+            size="0.004" rgba="0.6 0.2 1 0.9"/>
 
       <!-- Left wheel (R=10cm, tight to body: 13mm gap) -->
       <body name="wheel_L" pos="0 0.08 0">
@@ -164,8 +190,10 @@
     <!-- Wheel encoders: angular velocity -->
     <jointvel name="enc_L" joint="wheel_L"/>
     <jointvel name="enc_R" joint="wheel_R"/>
-    <!-- VL53L0X rangefinders use custom mj_ray in sensors.py (not built-in
-         rangefinder sensors) to exclude wheel geoms via group filtering.
-         Sites define ray origin + direction; raycasting done in Python. -->
+    <!-- 10× VL53L0X rangefinders use custom mj_ray in sensors.py (not
+         built-in rangefinder sensors) so the chassis body can be excluded
+         from hits. Sites define ray origin + direction; raycasting runs
+         in Python every physics tick. -->
+
   </sensor>
 </mujoco>
