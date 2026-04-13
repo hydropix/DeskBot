@@ -76,8 +76,22 @@ class SensorReadings:
 
 
 # ── Collision detection parameters ────────────────────────────────
-COLLISION_THRESHOLD = 8.0     # m/s² — impact magnitude to trigger detection
+#
+# COLLISION_THRESHOLD was originally 8 m/s² but empirical profiling
+# (see JOURNAL session on false-positive phantom stamps) showed that
+# normal balance dynamics produce regular HP-filter spikes of 10-20 m/s²
+# during turn-in-place and aggressive forward-turn regimes — 80+ false
+# triggers per second on the old 8 m/s² threshold. MuJoCo stiff contacts
+# produce peaks well above 100 m/s² on any real impact, so 25 m/s² sits
+# comfortably above balance noise and far below real hits.
+#
+# `COLLISION_REFRACTORY_S` is a one-shot lockout after a detection: the
+# HP filter rings for several ms after a spike, so without a cooldown a
+# single impact stamps the grid multiple times as the filter decays
+# through the threshold repeatedly.
+COLLISION_THRESHOLD = 25.0    # m/s² — impact magnitude to trigger detection
 COLLISION_HP_ALPHA = 0.95     # high-pass filter coefficient (higher = more filtering of DC)
+COLLISION_REFRACTORY_S = 0.25 # seconds — suppress re-triggers after an impact
 GRAVITY_NOMINAL = 9.81        # m/s² — expected gravity magnitude at rest
 
 
@@ -86,22 +100,26 @@ class CollisionDetector:
     Detects collisions using a high-pass filter on the accelerometer signal.
 
     The accelerometer constantly reads ~9.81 m/s² (gravity) plus balance
-    corrections (~2-5 m/s² at <5 Hz). Collisions produce sharp spikes
-    (>15 m/s² at >20 Hz). A first-order high-pass filter separates them.
+    corrections (~2-5 m/s² DC, up to ~20 m/s² transients at 10-30 Hz).
+    Real impacts produce much sharper broadband spikes (>>100 m/s² on
+    stiff contacts). A first-order high-pass filter separates gravity
+    and DC, a generous amplitude threshold separates impacts from balance
+    dynamics, and a refractory period prevents multi-stamping from a
+    single event as the filter rings back down through the threshold.
 
     High-pass filter: y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-    This removes the DC component (gravity) and low-frequency balance signal,
-    leaving only transient impacts.
     """
 
     def __init__(self, dt: float):
         self.dt = dt
         self._prev_accel = np.zeros(3)
         self._hp_accel = np.zeros(3)  # high-pass filtered output
+        self._refractory = 0.0
 
     def reset(self):
         self._prev_accel = np.zeros(3)
         self._hp_accel = np.zeros(3)
+        self._refractory = 0.0
 
     def process(self, readings: 'SensorReadings'):
         """Update collision fields in a SensorReadings object."""
@@ -113,14 +131,20 @@ class CollisionDetector:
         )
         self._prev_accel = accel.copy()
 
-        # Impact magnitude (norm of high-passed signal)
         magnitude = float(np.linalg.norm(self._hp_accel))
+
+        if self._refractory > 0.0:
+            self._refractory = max(0.0, self._refractory - self.dt)
+            readings.collision_detected = False
+            readings.collision_magnitude = 0.0
+            readings.collision_direction = np.zeros(3)
+            return
 
         if magnitude > COLLISION_THRESHOLD:
             readings.collision_detected = True
             readings.collision_magnitude = magnitude
-            # Direction: normalize the high-pass vector
             readings.collision_direction = self._hp_accel / magnitude
+            self._refractory = COLLISION_REFRACTORY_S
         else:
             readings.collision_detected = False
             readings.collision_magnitude = 0.0

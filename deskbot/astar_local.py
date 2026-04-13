@@ -93,6 +93,36 @@ LOCAL_HORIZON = 1.5
 GOAL_SEARCH_RADIUS = 2
 
 
+def inflate_mask(occupied: np.ndarray, radius: int) -> np.ndarray:
+    """
+    Dilate `occupied` by `radius` cells under Chebyshev distance.
+
+    Iterative 3×3 square dilation: each pass OR-merges every cell with
+    its eight neighbours, so after k passes any cell within Chebyshev
+    distance k of an originally occupied cell is set. Cost is
+    O(k · rows · cols) — a few thousand ops on a 60×60 grid at k=2.
+
+    Exposed as a module-level helper so `OccupancyGrid` can share the
+    same dilation kernel as `AStarPlanner` without bouncing through a
+    private static method.
+    """
+    mask = occupied.astype(bool, copy=True)
+    if radius <= 0:
+        return mask
+    for _ in range(int(radius)):
+        out = mask.copy()
+        out[1:, :]   |= mask[:-1, :]
+        out[:-1, :]  |= mask[1:, :]
+        out[:, 1:]   |= mask[:, :-1]
+        out[:, :-1]  |= mask[:, 1:]
+        out[1:, 1:]    |= mask[:-1, :-1]
+        out[:-1, :-1]  |= mask[1:, 1:]
+        out[1:, :-1]   |= mask[:-1, 1:]
+        out[:-1, 1:]   |= mask[1:, :-1]
+        mask = out
+    return mask
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Cached neighbourhood: (Δci, Δcj, step_cost)
 # ─────────────────────────────────────────────────────────────────────
@@ -141,38 +171,9 @@ class AStarPlanner:
         max_iterations: int = MAX_ITERATIONS,
     ):
         occupied = log_odds > occ_threshold
-        self._blocked = self._inflate(occupied, inflate_cells)
+        self._blocked = inflate_mask(occupied, inflate_cells)
         self._max_iterations = int(max_iterations)
         self._rows, self._cols = self._blocked.shape
-
-    # ── Mask construction ───────────────────────────────────────────
-
-    @staticmethod
-    def _inflate(occupied: np.ndarray, radius: int) -> np.ndarray:
-        """
-        Dilate `occupied` by `radius` cells under Chebyshev distance.
-
-        Implementation: iterative 3×3 square dilation. Each iteration
-        OR-merges every cell with its eight neighbours, so after k
-        iterations any cell within Chebyshev distance k of an originally
-        occupied cell is set. Cost O(k · rows · cols), which at k=2 and
-        60×60 is a few thousand operations — negligible.
-        """
-        mask = occupied.astype(bool, copy=True)
-        if radius <= 0:
-            return mask
-        for _ in range(int(radius)):
-            out = mask.copy()
-            out[1:, :]   |= mask[:-1, :]
-            out[:-1, :]  |= mask[1:, :]
-            out[:, 1:]   |= mask[:, :-1]
-            out[:, :-1]  |= mask[:, 1:]
-            out[1:, 1:]    |= mask[:-1, :-1]
-            out[:-1, :-1]  |= mask[1:, 1:]
-            out[1:, :-1]   |= mask[:-1, 1:]
-            out[:-1, 1:]   |= mask[1:, :-1]
-            mask = out
-        return mask
 
     # ── Queries ─────────────────────────────────────────────────────
 

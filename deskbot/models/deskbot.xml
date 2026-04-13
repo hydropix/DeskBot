@@ -107,13 +107,17 @@
       <site name="rf_C"  pos="0.035  0.000 0.112"
             zaxis="0.9962 0 -0.0872"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
-      <!-- FL: fovea left — parallel forward, offset +Y -->
+      <!-- FL: fovea left — +5° yaw outward, -5° pitch down.
+           Beam reaches the outer tire edge (y=+0.089) at d≈0.81 m,
+           which lands in the yellow zone of the map display — i.e.
+           obstacles sitting on the robot's actual swept width are
+           caught early enough to trigger a yellow-range avoidance. -->
       <site name="rf_FL" pos="0.035  0.018 0.112"
-            zaxis="0.9962 0 -0.0872"
+            zaxis="0.9924 0.0872 -0.0869"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
-      <!-- FR: fovea right — parallel forward, offset -Y -->
+      <!-- FR: fovea right — mirror of FL, -5° yaw -->
       <site name="rf_FR" pos="0.035 -0.018 0.112"
-            zaxis="0.9962 0 -0.0872"
+            zaxis="0.9924 -0.0872 -0.0869"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
 
       <!-- ── Mid-forward: ±25° ── -->

@@ -30,6 +30,7 @@ from deskbot.astar_local import (
     LOCAL_HORIZON as ASTAR_LOCAL_HORIZON,
     GOAL_SEARCH_RADIUS,
     INFLATE_CELLS,
+    inflate_mask,
     nearest_free_cell,
     path_initial_tangent,
 )
@@ -83,16 +84,21 @@ RF_BODY_ANGLES = {
 # rays and ~2.5 cm larger for side rays. The thresholds below already
 # include those offsets, so the effective physical trigger points are:
 #   SAFE_DIST        → ~30 cm from the robot front face
-#   CAUTION_DIST     → ~60 cm from the front face
+#   CAUTION_DIST     → ~80 cm from the front face
 #   WALL_FOLLOW_DIST → ~22 cm from the side face
 #
 # SAFE_DIST is the hard trigger for entering contour mode; CAUTION_DIST
-# is where cruise speed starts to roll off linearly. WALL_FOLLOW_DIST
-# is the P-controller setpoint for the side-laser wall tracker — tuned
-# to keep wheel/body clearance while staying above the VL53L0X grazing
-# threshold (~15 cm on matte surfaces).
+# is where cruise speed starts to roll off (quadratically — see
+# _state_go_heading). Widening it from 0.65 m to 0.85 m and using a
+# square ramp gives ~49 cm of braking runway instead of 29 cm, which
+# lets the outer velocity PI decelerate without the inner pitch loop
+# ever saturating — the dominant cause of residual collisions on
+# narrow obstacles. WALL_FOLLOW_DIST is the P-controller setpoint for
+# the side-laser wall tracker — tuned to keep wheel/body clearance
+# while staying above the VL53L0X grazing threshold (~15 cm on matte
+# surfaces).
 SAFE_DIST = 0.36
-CAUTION_DIST = 0.65
+CAUTION_DIST = 0.85
 WALL_FOLLOW_DIST = 0.25
 
 # Cruise envelope (m/s, rad/s). MAX_NAV_SPEED is held conservative so
@@ -128,7 +134,16 @@ GLOBAL_PROGRESS_MIN = 0.0        # if progress < this over one period, flip side
 # Stuck recovery.
 STUCK_TIME = 3.0
 STUCK_DIST = 0.06
-REVERSE_DURATION = 0.8
+# REVERSE back-off after a collision or stuck event. Must be long
+# enough that the phantom obstacle (stamped PHANTOM_STAMP_DIST ahead
+# of the chassis at impact) ends up clearly OUTSIDE CAUTION_DIST after
+# the reverse — otherwise the robot re-enters GO_HEADING still close
+# enough that CONTOUR's pivot-and-drive sweeps the chassis back into
+# the pole. With speed=-0.25 m/s and duration=1.8 s the robot retreats
+# ~0.45 m actual, leaving the stamp at 0.14 + 0.45 ≈ 0.59 m (just below
+# CAUTION_DIST=0.65, comfortably above SAFE_DIST=0.36) so the next
+# CONTOUR pivot has room to rotate without clipping.
+REVERSE_DURATION = 1.8
 REVERSE_SPEED = -0.25
 
 # ── Control gains ──
@@ -189,7 +204,10 @@ GRID_RAY_MAX = 1.5
 # survives long enough for the planner to see it and the mapviz to
 # render it in red.
 PHANTOM_STAMP_DIST = 0.14        # m — one cell past chassis front
-PHANTOM_STAMP_TTL  = 2.5         # seconds — how long a stamp stays sticky
+PHANTOM_STAMP_TTL  = 8.0         # seconds — how long a stamp stays sticky.
+                                 # Long enough that after a REVERSE + re-plan
+                                 # the obstacle is still on the map when the
+                                 # robot loops back past the same area.
 
 
 class FSMState(Enum):
@@ -237,12 +255,19 @@ class OccupancyGrid:
         # Sticky phantom stamps: list of (world_x, world_y, seconds_left).
         # Stored in world frame so grid shifts don't move them.
         self._sticky: list[tuple[float, float, float]] = []
+        # Lazily-computed C-space masks, keyed by (threshold, inflate).
+        # Any mutation to `grid` flips `_blocked_dirty`; the next query
+        # through `blocked_mask()` drops the cache and rebuilds.
+        self._blocked_cache: dict[tuple[float, int], np.ndarray] = {}
+        self._blocked_dirty = True
 
     def reset(self):
         self.grid[:] = 0.0
         self.cx = 0.0
         self.cy = 0.0
         self._sticky = []
+        self._blocked_cache.clear()
+        self._blocked_dirty = True
 
     def shift(self, robot_x: float, robot_y: float):
         """Shift grid to keep robot centered. Cells that fall off are dropped."""
@@ -251,6 +276,8 @@ class OccupancyGrid:
 
         if dx_cells == 0 and dy_cells == 0:
             return
+
+        self._blocked_dirty = True
 
         if abs(dx_cells) >= GRID_SIZE or abs(dy_cells) >= GRID_SIZE:
             self.grid[:] = 0.0
@@ -314,6 +341,8 @@ class OccupancyGrid:
         ri, rj = self.world_to_cell(robot_x, robot_y)
         hi, hj = self.world_to_cell(hit_x, hit_y)
 
+        self._blocked_dirty = True
+
         cells = list(self._bresenham(ri, rj, hi, hj))
         # Free update for all cells EXCEPT the endpoint (so a hit doesn't
         # simultaneously get decremented and incremented).
@@ -341,32 +370,35 @@ class OccupancyGrid:
                              heading: float, distance: float,
                              ttl: float):
         """
-        Inject a phantom obstacle at ``distance`` ahead of the robot,
-        spanning two world points perpendicular to the heading.
+        Inject a phantom obstacle at ``distance`` ahead of the robot as
+        a 3-wide × 2-deep block in the heading frame.
 
-        Both points are added to the sticky list with the given TTL
-        (seconds). They are also immediately written to ``LOG_ODD_MAX``
-        so the stamp is visible in the very first frame. Persistence
-        across the laser free-update storm is handled by
-        ``enforce_sticky`` which should be called every frame.
+        The 6 sample points are spread over a ~0.24 m × ~0.16 m patch:
+        - lateral: −GRID_RES, 0, +GRID_RES (3 cells wide, covers the
+          robot's swept width plus pose/heading uncertainty).
+        - longitudinal: ±0.5 × GRID_RES (so at least 1–2 cells deep,
+          accounting for where exactly the pole sits relative to the
+          chassis at impact time).
 
-        Two points are stamped (offset by ±0.5 × GRID_RES perpendicular
-        to the heading) to cover pose uncertainty and chassis width.
-        Depending on where the center falls inside its cell, they land
-        in either one or two distinct grid cells.
+        Every point is pushed onto the sticky list with the given TTL
+        and also written to ``LOG_ODD_MAX`` immediately, so the stamp
+        is visible on the very first frame. Persistence across the
+        laser free-update storm is handled by ``enforce_sticky`` which
+        must be called every frame.
         """
         fx = robot_x + distance * math.cos(heading)
         fy = robot_y + distance * math.sin(heading)
-        nx = -math.sin(heading)
-        ny = math.cos(heading)
-        offset = 0.5 * GRID_RES
-        for sign in (-1.0, +1.0):
-            px = fx + sign * offset * nx
-            py = fy + sign * offset * ny
-            self._sticky.append((px, py, ttl))
-            ci, cj = self.world_to_cell(px, py)
-            if self.in_bounds(ci, cj):
-                self.grid[ci, cj] = LOG_ODD_MAX
+        tx, ty = math.cos(heading), math.sin(heading)
+        nx, ny = -math.sin(heading), math.cos(heading)
+        self._blocked_dirty = True
+        for lat in (-1.0, 0.0, 1.0):
+            for lon in (-0.5, 0.5):
+                px = fx + lon * GRID_RES * tx + lat * GRID_RES * nx
+                py = fy + lon * GRID_RES * ty + lat * GRID_RES * ny
+                self._sticky.append((px, py, ttl))
+                ci, cj = self.world_to_cell(px, py)
+                if self.in_bounds(ci, cj):
+                    self.grid[ci, cj] = LOG_ODD_MAX
 
     def enforce_sticky(self, dt: float):
         """
@@ -382,6 +414,7 @@ class OccupancyGrid:
         """
         if not self._sticky:
             return
+        self._blocked_dirty = True
         still_live: list[tuple[float, float, float]] = []
         for (wx, wy, t) in self._sticky:
             new_t = t - dt
@@ -393,13 +426,51 @@ class OccupancyGrid:
                 self.grid[ci, cj] = LOG_ODD_MAX
         self._sticky = still_live
 
+    def blocked_mask(
+        self,
+        threshold: float = LOG_ODD_OCCUPIED_THRESHOLD,
+        inflate: int = INFLATE_CELLS,
+    ) -> np.ndarray:
+        """
+        Return the inflated (C-space) occupancy mask used by raycast
+        queries. A cell is True where a robot with `inflate`-cell
+        Chebyshev half-width would overlap an obstacle — i.e. obstacles
+        are grown by the robot footprint so that a point-ray check on
+        the result is equivalent to a swept-disc check on the raw grid.
+
+        The cache is dropped on any mutation of `self.grid` and rebuilt
+        lazily on the next call. Keyed by (threshold, inflate) so that
+        stricter queries (e.g. the early-avoidance picker's 1.2 log-odds
+        filter) can coexist with the default 0.5 threshold without
+        stepping on the nominal cache entry.
+        """
+        if self._blocked_dirty:
+            self._blocked_cache.clear()
+            self._blocked_dirty = False
+        key = (float(threshold), int(inflate))
+        mask = self._blocked_cache.get(key)
+        if mask is None:
+            occupied = self.grid > threshold
+            mask = inflate_mask(occupied, inflate)
+            self._blocked_cache[key] = mask
+        return mask
+
     def is_clear_direction(self, robot_x: float, robot_y: float,
                            angle: float, distance: float) -> bool:
         """
-        Return True if no occupied cell lies within `distance` along
-        the ray at `angle` from the robot. Cells outside the grid are
-        treated as unknown and therefore clear.
+        Return True if a robot (modelled as an `INFLATE_CELLS`-radius
+        disc) can sweep the ray at `angle` without overlapping any
+        occupied cell. Cells outside the grid are treated as unknown
+        and therefore clear.
+
+        Implementation: sample cells along the ray against the inflated
+        `blocked_mask`. Samples with s ≤ INFLATE_CELLS are skipped —
+        they overlap the robot's own current footprint and would
+        otherwise produce false positives from obstacles already to the
+        side/behind (classically the phantom-stamp case, where a fresh
+        14 cm stamp inflates the robot's own cell).
         """
+        mask = self.blocked_mask()
         steps = int(distance / GRID_RES)
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
@@ -410,13 +481,20 @@ class OccupancyGrid:
             ci, cj = self.world_to_cell(wx, wy)
             if not self.in_bounds(ci, cj):
                 return True
-            if self.grid[ci, cj] > LOG_ODD_OCCUPIED_THRESHOLD:
+            if s <= INFLATE_CELLS:
+                continue
+            if mask[ci, cj]:
                 return False
         return True
 
     def clearance_in_direction(self, robot_x: float, robot_y: float,
                                angle: float, max_dist: float = 1.0) -> float:
-        """Distance to the first occupied cell along the given ray."""
+        """
+        Distance to the first cell where the inflated robot disc would
+        collide along the given ray. See `is_clear_direction` for the
+        C-space rationale and the near-origin skip.
+        """
+        mask = self.blocked_mask()
         steps = int(max_dist / GRID_RES)
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
@@ -427,7 +505,9 @@ class OccupancyGrid:
             ci, cj = self.world_to_cell(wx, wy)
             if not self.in_bounds(ci, cj):
                 return max_dist
-            if self.grid[ci, cj] > LOG_ODD_OCCUPIED_THRESHOLD:
+            if s <= INFLATE_CELLS:
+                continue
+            if mask[ci, cj]:
                 return d
         return max_dist
 
@@ -628,6 +708,30 @@ class Navigator:
         return (self._pos_x * math.cos(self._target_heading)
                 + self._pos_y * math.sin(self._target_heading))
 
+    def _raw_front_clearance(self, max_dist: float) -> float:
+        """
+        Distance to the first occupied cell along the robot's current
+        heading, read from the RAW occupancy grid (no C-space
+        inflation). Exists specifically for the `_min_front_dist` merge
+        in `update()`: its result is compared directly to SAFE_DIST /
+        CAUTION_DIST, which already assume "distance to obstacle from
+        pivot axis" semantics — exactly what the raw grid gives.
+        """
+        cos_h = math.cos(self._heading)
+        sin_h = math.sin(self._heading)
+        steps = int(max_dist / GRID_RES) + 1
+        grid = self.grid.grid
+        for s in range(1, steps + 1):
+            d = s * GRID_RES
+            wx = self._pos_x + d * cos_h
+            wy = self._pos_y + d * sin_h
+            ci, cj = self.grid.world_to_cell(wx, wy)
+            if not self.grid.in_bounds(ci, cj):
+                return max_dist
+            if grid[ci, cj] > LOG_ODD_OCCUPIED_THRESHOLD:
+                return d
+        return max_dist
+
     @staticmethod
     def _wrap_angle(a: float) -> float:
         return math.atan2(math.sin(a), math.cos(a))
@@ -685,13 +789,38 @@ class Navigator:
                 self._pos_x, self._pos_y, self._heading,
                 PHANTOM_STAMP_DIST, PHANTOM_STAMP_TTL,
             )
+            # Force an immediate REVERSE. Without this, _state_go_heading
+            # would see min_front_dist < SAFE_DIST on the stamped cell and
+            # switch to CONTOUR — which pivots + drives forward while still
+            # glued to the obstacle, re-hitting it on the next frame. A
+            # straight back-off first creates the clearance CONTOUR needs.
+            self._fsm = FSMState.REVERSE
+            self._reverse_timer = REVERSE_DURATION
+            self._contour_side *= -1
+            self._contour_deviation = 0.0
+            self._smooth_vel = 0.0
+            self._smooth_yaw = 0.0
 
         # ── 3b. Re-impose sticky stamps ──
         # Must run AFTER _update_grid so the laser free-updates that
         # skim past an invisible obstacle do not erase the stamp.
         self.grid.enforce_sticky(dt)
 
-        # ── 3b. Early avoidance side cache (session 10) ──
+        # ── 3c. Merge grid-based front clearance into _min_front_dist ──
+        # Memory-only obstacles (phantom stamps from collision/stuck, or
+        # grid hits that have since drifted out of the sensor cone) must
+        # still trigger the SAFE_DIST / CAUTION_DIST logic so the robot
+        # doesn't walk back into something it knows is there. The raw
+        # occupancy grid is used — not the inflated C-space mask — so
+        # the distance semantics match the sensor-based SAFE_DIST
+        # threshold (a swept-disc query would subtract the robot radius
+        # twice).
+        grid_front = self._raw_front_clearance(CAUTION_DIST)
+        if grid_front < self._min_front_dist:
+            self._min_front_dist = grid_front
+        self.state.min_front_dist = self._min_front_dist
+
+        # ── 3d. Early avoidance side cache (session 10) ──
         # The cache is always stepped (even when disabled) so that the
         # FSM-is-GO-HEADING reset path stays byte-identical across flag
         # states. With `_use_early_avoid = False` the cached side is
@@ -785,6 +914,10 @@ class Navigator:
         SCAN_MAX = 2.20           # m, slightly above d_cut for full coverage
         ANGLE_STEP_DEG = 10       # 13 samples over +/- 60 deg
 
+        # C-space mask with the strict threshold — the robot footprint
+        # is baked in so point-rays below behave as swept discs.
+        strict_blocked = self.grid.blocked_mask(threshold=STRICT_LOG_ODDS)
+
         best_angle_deg = None
         best_score = -1.0
         any_hit = False
@@ -803,7 +936,9 @@ class Navigator:
                 ci, cj = self.grid.world_to_cell(wx, wy)
                 if not self.grid.in_bounds(ci, cj):
                     break
-                if self.grid.grid[ci, cj] > STRICT_LOG_ODDS:
+                if s <= INFLATE_CELLS:
+                    continue
+                if strict_blocked[ci, cj]:
                     clearance = d
                     any_hit = True
                     break
@@ -874,7 +1009,13 @@ class Navigator:
         alignment = math.cos(h_err)
         if alignment > ALIGNED_COS_THRESHOLD:
             vel = MAX_NAV_SPEED * min(alignment, 1.0)
-            vel *= min(self._min_front_dist / CAUTION_DIST, 1.0)
+            # Quadratic braking ramp: full cruise beyond CAUTION_DIST,
+            # then (d/CAUTION_DIST)^2 — lets the robot hold speed when
+            # there's clear runway and brakes hard only when the front
+            # actually gets close. Gives more margin than the linear
+            # ramp without feeling sluggish in open space.
+            dist_ratio = min(self._min_front_dist / CAUTION_DIST, 1.0)
+            vel *= dist_ratio * dist_ratio
             vel = max(vel, MIN_NAV_SPEED)
         elif alignment > PERPENDICULAR_COS_THRESHOLD:
             vel = MIN_NAV_SPEED * 0.5
