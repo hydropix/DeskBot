@@ -93,67 +93,68 @@
            (L/R=±25°, WL/WR=±55°, SL/SR=±90°) for obstacle scanning and
            corridor following; a single rear beam (B) watches behind.
 
-           All beams share a -5° downward tilt so that on perfectly flat
-           ground they eventually intersect the floor well before MAX_RANGE,
-           giving GroundGeometry a flat-ground expectation for each ray.
+           Downward tilt is computed by robot.ground_impact_pitch() so that
+           every beam — regardless of yaw — hits the ground at the same
+           horizontal distance (LASER_GROUND_TARGET = 2.0 m). With the pod
+           at world Z=0.212 m, pitch = atan2(0.212, 2.0) ≈ 6.05°:
+               sin(pitch) ≈ 0.1054   cos(pitch) ≈ 0.9944
+           Each zaxis = (cos(yaw)·cos(pitch), sin(yaw)·cos(pitch), -sin(pitch)).
            Hardware mapping: 2× TCA9548A I²C multiplexers with 1 sensor
            per channel (10 channels used out of 16). All physical modules
            share the same VL53L0X factory address 0x29 — the mux resolves
-           the collision with zero re-addressing.
-           Tilt factor: cos(5°)=0.9962, sin(5°)=0.0872 -->
+           the collision with zero re-addressing. -->
 
       <!-- ── Fovea: 3 parallel forward beams, covering the robot's width ── -->
-      <!-- C: fovea center — parallel forward, -5° tilt -->
+      <!-- C: fovea center — yaw 0°, pitch 6.05° down -->
       <site name="rf_C"  pos="0.035  0.000 0.112"
-            zaxis="0.9962 0 -0.0872"
+            zaxis="0.9944 0 -0.1054"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
-      <!-- FL: fovea left — +5° yaw outward, -5° pitch down.
-           Beam reaches the outer tire edge (y=+0.089) at d≈0.81 m,
-           which lands in the yellow zone of the map display — i.e.
-           obstacles sitting on the robot's actual swept width are
-           caught early enough to trigger a yellow-range avoidance. -->
+      <!-- FL: fovea left — +5° yaw outward, 6.05° pitch down.
+           Horizontal cap unchanged: the beam still reaches the outer tire
+           edge (y=+0.089) at d≈0.81 m — the steeper pitch only changes the
+           range at which the ray intersects the floor, not its XY path. -->
       <site name="rf_FL" pos="0.035  0.018 0.112"
-            zaxis="0.9924 0.0872 -0.0869"
+            zaxis="0.9906 0.0867 -0.1054"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
       <!-- FR: fovea right — mirror of FL, -5° yaw -->
       <site name="rf_FR" pos="0.035 -0.018 0.112"
-            zaxis="0.9924 -0.0872 -0.0869"
+            zaxis="0.9906 -0.0867 -0.1054"
             size="0.004" rgba="1 0.2 0.2 0.9"/>
 
       <!-- ── Mid-forward: ±25° ── -->
       <!-- L: mid-forward-left +25° — cos25=0.9063, sin25=0.4226 -->
       <site name="rf_L"  pos="0.028  0.030 0.112"
-            zaxis="0.9028 0.4210 -0.0872"
+            zaxis="0.9012 0.4203 -0.1054"
             size="0.004" rgba="1 0.5 0.2 0.8"/>
       <!-- R: mid-forward-right -25° -->
       <site name="rf_R"  pos="0.028 -0.030 0.112"
-            zaxis="0.9028 -0.4210 -0.0872"
+            zaxis="0.9012 -0.4203 -0.1054"
             size="0.004" rgba="1 0.5 0.2 0.8"/>
 
       <!-- ── Wide-forward: ±55° (kept from the earlier sweep optimum) ── -->
       <!-- WL: wide-forward-left +55° — cos55=0.5736, sin55=0.8192 -->
       <site name="rf_WL" pos="0.018  0.034 0.112"
-            zaxis="0.5714 0.8161 -0.0872"
+            zaxis="0.5704 0.8146 -0.1054"
             size="0.004" rgba="1 0.6 0.2 0.8"/>
       <!-- WR: wide-forward-right -55° -->
       <site name="rf_WR" pos="0.018 -0.034 0.112"
-            zaxis="0.5714 -0.8161 -0.0872"
+            zaxis="0.5704 -0.8146 -0.1054"
             size="0.004" rgba="1 0.6 0.2 0.8"/>
 
       <!-- ── Pure side: ±90° (corridor tracking) ── -->
       <!-- SL: side-left +90° -->
       <site name="rf_SL" pos="0.000  0.034 0.112"
-            zaxis="0 0.9962 -0.0872"
+            zaxis="0 0.9944 -0.1054"
             size="0.004" rgba="1 0.2 0.2 0.8"/>
       <!-- SR: side-right -90° -->
       <site name="rf_SR" pos="0.000 -0.034 0.112"
-            zaxis="0 -0.9962 -0.0872"
+            zaxis="0 -0.9944 -0.1054"
             size="0.004" rgba="1 0.2 0.2 0.8"/>
 
       <!-- ── Rear: single 180° beam ── -->
       <!-- B: rear-center, looking backward -->
       <site name="rf_B"  pos="-0.035 0.000 0.112"
-            zaxis="-0.9962 0 -0.0872"
+            zaxis="-0.9944 0 -0.1054"
             size="0.004" rgba="0.6 0.2 1 0.9"/>
 
       <!-- Left wheel (R=10cm, tight to body: 13mm gap) -->

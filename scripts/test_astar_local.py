@@ -118,14 +118,22 @@ def test_empty_grid_straight_line():
 
 def test_wall_with_gap():
     """
-    Vertical wall at ci=30 spanning the whole grid except a gap at
-    cj∈[28,32]. Start on the left, goal on the right. A* must route
-    through the gap.
+    Vertical wall at ci=30 spanning the whole grid except a gap. The
+    raw gap must be wide enough to stay passable after inflation:
+    with INFLATE_CELLS=k the interior walls eat k cells on each side,
+    so a gap of width 2k+1 leaves exactly one free cell in the middle,
+    and 2k+3 leaves a 3-cell passable strip.
     """
     print("\n-- test_wall_with_gap --")
     grid = empty_grid()
-    put_wall(grid, 30, 0, 27)
-    put_wall(grid, 30, 33, GRID_SIZE - 1)
+    # Gap width = 2·INFLATE_CELLS + 3 so there's always a ≥3-cell free
+    # strip at ci=30 regardless of the inflation constant. Centred on
+    # cj=30.
+    gap_half = INFLATE_CELLS + 1
+    wall_left_end = 30 - gap_half - 1
+    wall_right_start = 30 + gap_half + 1
+    put_wall(grid, 30, 0, wall_left_end)
+    put_wall(grid, 30, wall_right_start, GRID_SIZE - 1)
 
     planner = AStarPlanner(grid, OCC_THRESHOLD)
     start = (5, 5)
@@ -136,14 +144,13 @@ def test_wall_with_gap():
     print(f"  path length = {len(r.path)} cells")
     print(f"  expanded    = {r.expanded}")
     print(f"  reason      = {r.reason}")
-    # Sanity: the path must cross ci=30 via the gap, i.e. at a cj in
-    # [28-INFLATE_CELLS+1 .. 32+INFLATE_CELLS-1]. With 2-cell inflation
-    # the gap width 5 is just barely passable at the centre.
+    # Free strip at ci=30 is cj ∈ [30 - 1, 30 + 1] = [29, 31]. The path
+    # must cross inside that strip.
     crossings = [cj for (ci, cj) in r.path if ci == 30]
     print(f"  ci=30 crossings at cj = {crossings}")
     assert crossings, "path does not cross the wall column"
     for cj in crossings:
-        assert 28 <= cj <= 32, f"crossing at cj={cj} is inside the wall"
+        assert 29 <= cj <= 31, f"crossing at cj={cj} is inside the wall"
     print("  PASS")
 
 
@@ -185,14 +192,26 @@ def test_goal_inside_obstacle_nudged():
 
     planner = AStarPlanner(grid, OCC_THRESHOLD)
     start = (5, 30)
-    raw_goal = (40, 30)  # inside the box
-    nudged = nearest_free_cell(planner, *raw_goal, radius=5)
+    raw_goal = (40, 30)  # inside the box, equidistant from all edges
+    # The box is a 5×5 square centred on raw_goal. After Chebyshev
+    # inflation by INFLATE_CELLS, the minimum distance from raw_goal
+    # to the nearest free cell is 2 + INFLATE_CELLS (2 to exit the
+    # raw box + INFLATE_CELLS to exit the buffer). The search radius
+    # must cover at least that.
+    search_radius = INFLATE_CELLS + 3
+    nudged = nearest_free_cell(planner, *raw_goal, radius=search_radius)
     assert nudged is not None, "nearest_free_cell returned None"
     assert planner.is_free(*nudged)
     print(f"  raw goal     = {raw_goal} (blocked)")
     print(f"  nudged goal  = {nudged}")
-    # Must be outside the inflated box (which extends 2 cells out).
-    assert nudged[0] < 36 or nudged[0] > 44 or nudged[1] < 26 or nudged[1] > 34
+    # Must be outside the inflated box (which extends INFLATE_CELLS
+    # cells out in each direction from the raw box [38..42]×[28..32]).
+    low_i  = 38 - INFLATE_CELLS
+    high_i = 42 + INFLATE_CELLS
+    low_j  = 28 - INFLATE_CELLS
+    high_j = 32 + INFLATE_CELLS
+    assert (nudged[0] < low_i or nudged[0] > high_i
+            or nudged[1] < low_j or nudged[1] > high_j)
 
     r = planner.plan(start, nudged)
     assert r.path is not None

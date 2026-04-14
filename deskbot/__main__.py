@@ -28,8 +28,8 @@ parser.add_argument(
     help="Use legacy PID controller instead of LQR",
 )
 parser.add_argument(
-    "--planner", choices=["bug2", "astar", "field"], default="astar",
-    help="Navigation planner: bug2, astar (Bug2+A*), field (Potential Field/fluide) (default: astar)",
+    "--planner", choices=["bug2", "astar", "astar_pf", "field"], default="astar",
+    help="Navigation planner: bug2, astar (Bug2+A*), astar_pf (A*+potential field on the grid), field (pure reactive potential field) (default: astar)",
 )
 args = parser.parse_args()
 

@@ -25,12 +25,15 @@ Occupancy mask:
 
 Obstacle inflation:
     INFLATE_CELLS = ceil((robot_half_width + safety_margin) / GRID_RES)
-                  = ceil((0.13 m + 0.05 m) / 0.08 m)
-                  = ceil(2.25)  →  2 cells  (rounded down because the
-                  5 cm margin already buys the fractional cell).
+                  = ceil((0.13 m + 0.11 m) / 0.08 m)
+                  = 3 cells  (24 cm Chebyshev buffer).
     Any free cell within Chebyshev distance ≤ INFLATE_CELLS of an
     occupied cell is marked impassable. Encodes the robot's physical
-    footprint + safety buffer.
+    footprint + safety buffer. The 11 cm margin (vs. the strict 3 cm
+    needed to cover half_width) absorbs dead-reckoning drift, pitch-
+    compensation residuals, and rangefinder quantisation — without it,
+    A* plans paths that graze the inflation boundary and the real robot
+    clips obstacles in practice.
 
 Neighbourhood:
     8-connected. Step cost:
@@ -40,7 +43,21 @@ Neighbourhood:
     "shoulder" cells is blocked (no corner cutting through obstacles).
 
 Cost g(n):
-    g(n) = Σ c_step along the expanded path. Units: grid cells.
+    g(n) = Σ (c_step + φ(n')) along the expanded path, where n' is the
+    cell being entered. Units: grid cells.
+
+    φ(n') is the optional repulsive potential — zero by default, or
+    α · exp(-d(n') / λ) when the planner is constructed with a positive
+    `potential_gain`. d(n') is the Euclidean distance (in cells) from n'
+    to the nearest cell of the inflated obstacle mask, obtained via
+    `scipy.ndimage.distance_transform_edt`. This makes cells near the
+    inflation boundary strictly more expensive to traverse, pushing A*
+    paths toward the middle of free corridors without changing the
+    algorithm itself.
+
+    Admissibility of the octile heuristic is preserved: φ ≥ 0, so the
+    actual cost from any node to the goal is ≥ the pure geometric cost
+    that octile computes, hence octile still underestimates it.
 
 Heuristic h(n):
     Octile distance, admissible and consistent for 8-connectivity on a
@@ -70,15 +87,19 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Tunable constants — justified in the module docstring.
 # ─────────────────────────────────────────────────────────────────────
 
-#: Inflation radius, in cells. 2 @ 8 cm ≈ 16 cm Chebyshev buffer, which
-#: covers the 13 cm half-width of DeskBot and leaves ~3 cm of margin.
-INFLATE_CELLS = 2
+#: Inflation radius, in cells. 3 @ 8 cm = 24 cm Chebyshev buffer, which
+#: covers the 13 cm half-width of DeskBot and leaves ~11 cm of margin.
+#: Bumped from 2 to 3 after empirically observing the robot clip obstacles
+#: when the planned path hugged the inflation boundary — 3 cm of margin
+#: was not enough to absorb DR drift + pitch residuals + encoder noise.
+INFLATE_CELLS = 3
 
 #: Hard bound on cells expanded by A*. Matches ~55 % of the 60x60 grid
 #: — well above the distance any realistic contour detour takes.
@@ -91,6 +112,21 @@ LOCAL_HORIZON = 1.5
 #: Radius (in cells) of the fallback neighbourhood scan when the nominal
 #: goal falls inside an inflated obstacle. 2 cells = 16 cm search box.
 GOAL_SEARCH_RADIUS = 2
+
+#: Default repulsive-potential gain α (dimensionless, same units as the
+#: per-step A* cost — so α=0.6 means a cell glued to the inflation
+#: boundary costs as much as 0.6 extra axial steps to enter). Zero
+#: disables the potential field entirely, giving the legacy pure-geometric
+#: cost. Value picked so that a cell at d=0 is ~half as expensive as a
+#: diagonal step (√2 ≈ 1.41), i.e. strong bias but never dominating the
+#: shortest-path term.
+POTENTIAL_GAIN = 0.6
+
+#: Default decay length λ in cells. exp(-d/λ) drops to ~5% at d = 3λ, so
+#: λ=3 means the repulsion is still meaningful ~9 cells (~72 cm) away
+#: from an obstacle and nearly zero beyond that. Matches roughly the
+#: CAUTION_DIST envelope used by the reactive layer in navigation.py.
+POTENTIAL_LAMBDA_CELLS = 3.0
 
 
 def inflate_mask(occupied: np.ndarray, radius: int) -> np.ndarray:
@@ -136,6 +172,31 @@ _NEIGHBOURS: tuple[tuple[int, int, float], ...] = (
 )
 
 
+def _build_cost_field(
+    blocked: np.ndarray,
+    gain: float,
+    lambda_cells: float,
+) -> np.ndarray | None:
+    """
+    Build the per-cell repulsive potential φ(cell) = α · exp(-d / λ).
+
+    d(cell) is the Euclidean distance (in cells) from `cell` to the
+    nearest True pixel of `blocked`, computed by
+    `scipy.ndimage.distance_transform_edt` on the inverted mask.
+    Returns None when the field is disabled (gain ≤ 0 or λ ≤ 0), or
+    when there is no obstacle at all in the grid (distance transform
+    is undefined — every cell would have infinite distance and zero
+    cost anyway).
+    """
+    if gain <= 0.0 or lambda_cells <= 0.0:
+        return None
+    if not blocked.any():
+        return None
+    dist_cells = distance_transform_edt(~blocked)
+    field = gain * np.exp(-dist_cells / float(lambda_cells))
+    return field.astype(np.float32, copy=False)
+
+
 @dataclass
 class AStarResult:
     """Outcome of a single plan() call."""
@@ -146,7 +207,8 @@ class AStarResult:
 
 class AStarPlanner:
     """
-    8-connected A* over an inflated occupancy mask.
+    8-connected A* over an inflated occupancy mask, optionally with a
+    repulsive potential field baked into the step cost.
 
     Parameters
     ----------
@@ -161,6 +223,12 @@ class AStarPlanner:
         Chebyshev dilation radius applied to the occupied mask.
     max_iterations : int
         Hard cap on cells expanded by plan().
+    potential_gain : float
+        α in φ(cell) = α · exp(-d / λ). Zero disables the field and the
+        planner behaves exactly like the legacy pure-geometric A*.
+    potential_lambda_cells : float
+        λ in cells. Ignored when `potential_gain` is zero. Must be > 0
+        when the field is active.
     """
 
     def __init__(
@@ -169,11 +237,16 @@ class AStarPlanner:
         occ_threshold: float,
         inflate_cells: int = INFLATE_CELLS,
         max_iterations: int = MAX_ITERATIONS,
+        potential_gain: float = 0.0,
+        potential_lambda_cells: float = POTENTIAL_LAMBDA_CELLS,
     ):
         occupied = log_odds > occ_threshold
         self._blocked = inflate_mask(occupied, inflate_cells)
         self._max_iterations = int(max_iterations)
         self._rows, self._cols = self._blocked.shape
+        self._cost_field = _build_cost_field(
+            self._blocked, potential_gain, potential_lambda_cells,
+        )
 
     # ── Queries ─────────────────────────────────────────────────────
 
@@ -181,6 +254,15 @@ class AStarPlanner:
     def blocked_mask(self) -> np.ndarray:
         """Read-only view of the inflated obstacle mask (for tests/viz)."""
         return self._blocked
+
+    @property
+    def cost_field(self) -> np.ndarray | None:
+        """
+        Read-only view of the repulsive potential φ(cell), or None if
+        the field is disabled. Useful for visualization: heatmap this
+        and you see the soft inflation gradient around every obstacle.
+        """
+        return self._cost_field
 
     def is_free(self, ci: int, cj: int) -> bool:
         if ci < 0 or ci >= self._rows or cj < 0 or cj >= self._cols:
@@ -244,6 +326,7 @@ class AStarPlanner:
 
             ci, cj = current
             g_cur = g_score[current]
+            cost_field = self._cost_field
             for dci, dcj, step in _NEIGHBOURS:
                 ni, nj = ci + dci, cj + dcj
                 if not self.is_free(ni, nj):
@@ -255,6 +338,8 @@ class AStarPlanner:
                     if self._blocked[ci + dci, cj] or self._blocked[ci, cj + dcj]:
                         continue
                 tentative = g_cur + step
+                if cost_field is not None:
+                    tentative += float(cost_field[ni, nj])
                 nb = (ni, nj)
                 if tentative < g_score.get(nb, math.inf):
                     g_score[nb] = tentative

@@ -529,7 +529,44 @@ Bruno asked whether the ESP32-S3 N16R8 had room for a VL53L5CX (8×8 ToF matrix)
 
 ---
 
-## Roadmap (as of 2026-04-13)
+## Session 12 -- 2026-04-14 : Champ de potentiel répulsif sur la grille, injecté dans A\*
+
+**Contexte.** Bruno a proposé de « flouter progressivement la carte mentale du robot » pour transformer les obstacles en champs répulsifs avec effet « élastique ». C'est la technique classique des **champs de potentiel artificiels** (Khatib 1986), et l'effet élastique qu'il se rappelait est probablement l'**Elastic Band** (Quinlan & Khatib 1993). Le projet avait déjà une tentative en espace capteur (`deskbot/field_nav.py`) avec forces calculées sur les beams laser — mais aucun champ de potentiel en espace carte. Discussion d'architecture : je lui ai présenté deux points d'injection possibles (A\* global vs VFH-lite réactif) et recommandé A\* en premier pour la raison « rigor first » — effet mesurable sur les chemins, pas de risque de couplage avec la boucle de contrôle à 500 Hz, et cohérent avec le pattern opt-in des sessions précédentes.
+
+**What was done.**
+
+- `deskbot/astar_local.py` : ajout d'un champ de coût φ(cellule) = α · exp(-d/λ), où `d` est la distance euclidienne (en cellules) à l'obstacle gonflé le plus proche, calculée une fois par planification via `scipy.ndimage.distance_transform_edt`. Le coût est ajouté comme coût d'entrée de cellule dans la boucle A\*, donc la structure de l'algorithme et la garantie d'optimalité sont préservées (octile reste admissible puisque φ ≥ 0). Constantes `POTENTIAL_GAIN=0.6` et `POTENTIAL_LAMBDA_CELLS=3.0` justifiées dans la docstring.
+- `deskbot/navigation.py` : nouveau flag `use_potential_field` dans `Navigator.__init__`, avec surcharges optionnelles `potential_gain` / `potential_lambda_cells` pour le tuning. Off par défaut. Le flag ne sert que si `use_astar=True` (le champ vit dans le planificateur).
+- `deskbot/sim.py` + `deskbot/__main__.py` : nouveau choix `--planner astar_pf` qui active `use_astar=True` et `use_potential_field=True`.
+- `scripts/benchmark_random.py` : accepte `astar_pf` comme planner choice pour permettre un benchmark A/B sur les 100 épisodes habituels.
+- Accesseur public `AStarPlanner.cost_field` pour permettre une visualisation future (heatmap de la grille de coût).
+
+**What worked.**
+
+- Smoke test différentiel sur un couloir synthétique (deux murs parallèles à cj=20 et cj=40, chemin de (5,25) à (55,25)) : le plain A\* colle à la colonne de départ (mean cj = 25.0), tandis que A\*+potentiel dérive vers le centre du couloir (mean cj = 28.6). **Même longueur de chemin** (51 cellules), mais ~72 % plus près du centre. La preuve numérique que le coût fait exactement ce qu'il doit : biaiser sans allonger quand le biais est gratuit.
+- L'extremum du champ de coût est exactement α = 0.6 (contre une cellule gonflée) et décroît à ~1e-6 loin des obstacles. Conforme à la formule.
+- Zéro dépendance nouvelle : scipy était déjà dans `requirements.txt`.
+
+**What failed / lessons learned.**
+
+- Rien de cassé cette session — le changement est isolé, local, et commutatif avec l'ancien comportement via le flag. C'est précisément l'intérêt de viser le niveau de planification plutôt que la boucle réactive.
+- **Ce qu'il reste à faire** : benchmarker sur les 100 épisodes randomisés (`python scripts/benchmark_random.py --planner astar_pf`) et comparer le taux de succès, le taux de chute et la distance moyenne aux murs avec `astar` nu. Sans cette validation, le flag reste une curiosité — conformément à la règle « never rewrite validated nav without benchmark » (mémoire `feedback_nav_redesign.md`).
+- **Risque identifié à surveiller dans le benchmark** : si λ est trop grand par rapport à la taille typique des couloirs, le champ de potentiel peut saturer deux parois opposées et annuler son propre effet (minima locaux dans le plan des coûts). À tester d'abord sur les scènes larges, puis chicanes étroites où ce risque est maximal.
+- **Choix méthodologique** : je n'ai délibérément pas ajouté l'injection dans la couche VFH-lite réactive, même si elle serait « plus spectaculaire visuellement ». Toucher à une boucle qui tourne à 500 Hz et qui interagit avec le PID de pitch est un changement de contrôle, pas de planification — à garder pour une session dédiée, avec instrumentation et benchmark séparés.
+
+**Files modified.**
+
+- `deskbot/astar_local.py` (ajout du champ de potentiel, ~50 lignes + docstring)
+- `deskbot/navigation.py` (flag Navigator + propagation à `_contour_side_from_astar`)
+- `deskbot/sim.py` (nouveau choix `astar_pf` dans la fabrique)
+- `deskbot/__main__.py` (CLI `--planner astar_pf`)
+- `scripts/benchmark_random.py` (propagation au banc de test)
+
+**Addendum : `INFLATE_CELLS` 2 → 3.** Juste après l'implémentation, Bruno a signalé que l'inflation existante (2 cellules = 16 cm Chebyshev, 3 cm de marge au-delà du demi-châssis de 13 cm) était insuffisante — le robot clippe encore les obstacles en pratique parce que les 3 cm ne couvrent pas la dérive dead-reckoning + les résidus de compensation de pitch + la quantification des encodeurs. Passage de `INFLATE_CELLS = 2` à `3` (24 cm Chebyshev, 11 cm de marge). Les deux tests unitaires qui dimensionnaient leurs passages en dur (gap de 5 cellules dans `test_wall_with_gap`, rayon de nudge fixé à 5 dans `test_goal_inside_obstacle_nudged`) ont été réécrits pour exprimer leurs bornes *en fonction de* `INFLATE_CELLS` — plus jamais à retoucher si la constante re-bouge. 7/7 tests passent. Effet bonus : le champ de potentiel profite de la zone d'influence élargie (la distance transform démarre d'un buffer plus large), donc le smoke test du couloir synthétique s'améliore : mean cj passe de 28.6 à 29.4 (distance au centre 0.59 vs 1.39, soit 88 % plus près au lieu de 72 %). Inflation et potentiel sont synergiques, pas concurrents.
+
+---
+
+## Roadmap (as of 2026-04-14)
 
 ### Completed
 

@@ -7,6 +7,7 @@ Coordinate system: X=forward, Y=left, Z=up.
 The MJCF model is defined in models/deskbot.xml (robot only)
 and models/scene.xml (robot + environment).
 """
+import math
 from pathlib import Path
 
 MODELS_DIR = Path(__file__).parent / "models"
@@ -27,3 +28,35 @@ WHEEL_SEPARATION = 0.16     # 16 cm axle-to-axle
 WHEEL_MASS = 0.05            # 50 g each
 
 MAX_TORQUE = 3.0             # Nm per motor
+
+# Sensor pod geometry — kept in sync with deskbot.xml.
+# Chassis free-body origin is at world Z=0.10; each rangefinder site is at
+# local Z=0.112 → world Z=0.212 m above ground when the robot is upright.
+SENSOR_POD_HEIGHT = 0.212            # metres above ground at rest
+LASER_GROUND_TARGET = 2.0            # metres — horizontal distance where
+                                     # every beam should intersect the floor
+
+
+def ground_impact_pitch(sensor_height: float,
+                        ground_distance: float = LASER_GROUND_TARGET) -> float:
+    """
+    Downward pitch angle (radians) so a laser mounted at ``sensor_height``
+    above the ground hits the floor at ``ground_distance`` horizontal metres
+    from its origin — independent of the beam's yaw direction.
+
+    The geometry is a right triangle:
+        vertical leg   = sensor_height      (above the floor)
+        horizontal leg = ground_distance    (along the ray's XY projection)
+        pitch          = atan2(sensor_height, ground_distance)
+
+    A beam rotated by this pitch has a unit direction::
+
+        zaxis = (cos(yaw) * cos(pitch),
+                 sin(yaw) * cos(pitch),
+                -sin(pitch))
+
+    regardless of how it is aimed horizontally. Applied uniformly to every
+    VL53L0X beam on the sensor pod: all beams reach the ground at the same
+    range, giving the state estimator a consistent flat-ground expectation.
+    """
+    return math.atan2(sensor_height, ground_distance)

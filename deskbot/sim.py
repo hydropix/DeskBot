@@ -174,10 +174,18 @@ def run(scene_name: str = DEFAULT_SCENE, scene_xml: str | None = None,
         print("  Planner: Field Navigator (Potential Field - fluide)")
         use_field_nav = True
     else:
-        use_astar = (planner == "astar")
+        use_astar = planner in ("astar", "astar_pf")
         use_early = (planner == "astar")
-        navigator = Navigator(dt, mj_model=model, use_astar=use_astar, use_early_avoid=use_early)
-        if use_astar:
+        use_potential_field = (planner == "astar_pf")
+        navigator = Navigator(
+            dt, mj_model=model,
+            use_astar=use_astar,
+            use_early_avoid=use_early,
+            use_potential_field=use_potential_field,
+        )
+        if use_potential_field:
+            print("  Planner: Bug2 + A* local + repulsive potential field on grid")
+        elif use_astar:
             print("  Planner: Bug2 + A* local + early avoidance")
         else:
             print("  Planner: Bug2 (baseline)")

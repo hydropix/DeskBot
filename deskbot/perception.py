@@ -34,14 +34,18 @@ from deskbot.sensors import (
 
 
 # ── Pitch uncertainty (1-sigma) used by classify() ──────────────────
-# Derived from the complementary filter performance on a dynamic balancer:
-#   - Accelerometer bias ~0.02 m/s² → ~0.002 rad steady-state angle error
-#   - Gyro integration lag during active balancing adds ~0.005-0.01 rad
-#   - Filter transient on impulses ~0.01 rad
-# A 1-sigma of 0.02 rad (~1.1°) envelopes these sources for a well-tuned
-# complementary filter in active balancing. Values above ~0.03 rad cause
-# the propagated tolerance near the horizon to swamp real obstacles.
-DEFAULT_SIGMA_PITCH = 0.02
+# Empirically calibrated via scripts/diag_ground_filter.py on 6 random
+# navigation episodes (~186k ground-hit samples). Measured pitch_est −
+# pitch_true distribution on a balancing robot driving through random
+# obstacle fields:
+#   - Steady-state active balancing: ±0.01 rad (matches datasheet)
+#   - Turn-in-place / velocity transients: ±0.02-0.03 rad
+#   - Collision recovery (complementary filter ringing): up to ±0.13 rad
+# A 1-sigma of 0.03 rad (~1.7°) envelopes ~95% of samples and keeps the
+# propagated tolerance usable near the horizon. The rare collision-
+# transient outliers are handled separately by the ground-facing beam
+# envelope check in classify(), not by widening sigma for everyone.
+DEFAULT_SIGMA_PITCH = 0.03
 
 # Relative tolerance cap — physical precision ceiling.
 #
@@ -54,13 +58,59 @@ DEFAULT_SIGMA_PITCH = 0.02
 # is considered ill-conditioned and classification falls back to the
 # raw sensor noise only (more conservative toward flagging obstacles).
 #
-# 0.15 means we trust the geometry to ~15% relative accuracy.
+# 0.15 means we trust the geometry to ~15% relative accuracy. A higher
+# cap helped the front-beam FPs in diag but cost 25-39% recall on
+# rf_WL/rf_WR (wide-forward beams see real obstacles only 20-30% closer
+# than the nominal ground-hit distance, so the broader band swallowed
+# them). Kept at 0.15 — the sigma bump from 0.02→0.03 already removes
+# ~80% of the front-beam FPs without touching the cap.
 MAX_RELATIVE_PITCH_TOL = 0.15
 
 # Half-step used for the symmetric finite difference ∂(expected)/∂pitch.
 # Must be small enough to be locally linear, large enough to dominate
 # floating-point noise. 1 milliradian (~0.057°) is a good compromise.
 _PITCH_DERIV_STEP = 1e-3
+
+# ── Ground-facing envelope (collision-transient robustness) ─────────
+# A beam whose body-frame direction has a non-negligible downward
+# component was physically aimed at the floor. When the filter computes
+# "no ground expected" for such a beam (i.e., at pitch_est the rotated
+# ray points upward or beyond RF_MAX_RANGE), we do NOT trust that verdict
+# blindly — the estimator may be in a collision transient and off by
+# several degrees. Instead we re-sample expected_distance at
+# pitch_est ± k·sigma_pitch; if the beam could reach the floor at any
+# pitch in that window, a measured hit is consistent with ground and
+# gets suppressed instead of being stamped as an obstacle.
+#
+# Threshold −0.02 is a small deadband: purely-side beams (rf_SL, rf_SR
+# mounted horizontally) have d_body_z ≈ 0 and are excluded, so they
+# keep their legitimate "any hit = obstacle" behaviour.
+GROUND_FACING_DBODY_Z = -0.02
+
+# Envelope half-width (in multiples of sigma_pitch) used by the
+# ground-facing re-check. 4·sigma = 4·0.03 = 0.12 rad ≈ 6.9°, enough to
+# envelope the largest pitch_est errors observed post-collision
+# (up to ~7.6° in diag). Beyond that the robot has fallen.
+PITCH_ENVELOPE_K = 4.0
+
+# ── Confidence threshold for obstacle hits ─────────────────────────
+# An obstacle reading is "confident" when it cannot be explained by a
+# plausible pitch error: the measurement lies so far below the flat-
+# ground expectation that even a worst-case pitch bias would not shift
+# the expected distance down to it. We require the deviation to exceed
+# CONFIDENT_DEV_TOL_RATIO · tolerance (which already includes pitch-
+# propagated uncertainty). A ratio of 3 rejects ~99.7% of Gaussian noise
+# tails, so confident hits are essentially guaranteed to be real solid
+# objects. They get promoted to sticky grid stamps in Navigator so a
+# single beam catching a thin pole survives the next laser sweep.
+CONFIDENT_DEV_TOL_RATIO = 3.0
+
+# Minimum absolute deviation (m) for confidence — guards against
+# micro-tolerances from very-short expected distances where a 3-sigma
+# bound is still tiny. Real obstacles are at least 5 cm closer than the
+# flat-ground expectation; anything below that is indistinguishable
+# from a curb or a slope step.
+CONFIDENT_DEV_ABS_MIN = 0.05
 
 
 @dataclass(frozen=True)
@@ -71,6 +121,12 @@ class GroundReading:
     deviation: float      # measured - expected (signed); NaN if either side unknown
     tolerance: float      # total 1-sigma tolerance used for classification (m)
     kind: str             # "flat" | "obstacle" | "hole" | "no_reading" | "no_ground_expected"
+    confident: bool = False  # True if the obstacle verdict is robust to pitch noise
+                             # (measured is many tolerances below expected, or the
+                             # beam never reaches the floor regardless of pitch).
+                             # Callers should promote confident hits to sticky
+                             # stamps so a single reading on a thin obstacle
+                             # (table leg, pole) survives the next free-ray wave.
 
 
 def _rotation_y(theta: float) -> np.ndarray:
@@ -144,6 +200,9 @@ class GroundGeometry:
         #   v_body = R_chassis^T · (v_world - chassis_pos_world)
         # This works regardless of the chassis orientation at init time.
         self._mounts: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        # Beams with a non-trivial downward component in body frame are
+        # "ground-facing" — see GROUND_FACING_DBODY_Z comment above.
+        self._ground_facing: dict[str, bool] = {}
         for name in RF_NAMES:
             site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name)
             if site_id < 0:
@@ -161,6 +220,7 @@ class GroundGeometry:
             d_body /= np.linalg.norm(d_body)
 
             self._mounts[name] = (p_body.copy(), d_body)
+            self._ground_facing[name] = bool(d_body[2] < GROUND_FACING_DBODY_Z)
 
     @property
     def sensors(self) -> list[str]:
@@ -169,6 +229,14 @@ class GroundGeometry:
     @property
     def axle_height(self) -> float:
         return self._axle_height
+
+    def is_ground_facing(self, name: str) -> bool:
+        """Whether the beam's body-frame direction has a downward
+        component (i.e., it was designed to see the floor at some
+        pitch). Used by the Navigator to decide which beams to mute
+        during a post-collision lockout — side beams that never see
+        ground (rf_SL, rf_SR) stay active the whole time."""
+        return self._ground_facing.get(name, False)
 
     def expected_distance(self, name: str, pitch: float) -> float:
         """
@@ -199,6 +267,40 @@ class GroundGeometry:
         if distance > RF_MAX_RANGE:
             return math.inf
         return distance
+
+    def _ground_envelope(
+        self, name: str, pitch: float, sigma_pitch: float,
+    ) -> tuple[float, float]:
+        """
+        Bracket of plausible flat-ground distances for a beam when the
+        estimator pitch is uncertain.
+
+        Samples expected_distance(name, pitch + δ) at 11 points over
+        [-k·sigma_pitch, +k·sigma_pitch] (fine enough to avoid missing
+        the true pitch in a steep near-horizon regime) and returns
+        (min_finite, max_finite) — both bounds come from *finite*
+        samples, so a single horizon-grazing sample does not push the
+        upper bound to +inf. If no sample hits the floor at all the
+        envelope degenerates to (+inf, +inf), letting the caller fall
+        back to the no_ground_expected verdict.
+        """
+        k = PITCH_ENVELOPE_K
+        n = 11
+        e_min = math.inf
+        e_max = -math.inf
+        for i in range(n):
+            frac = -1.0 + 2.0 * i / (n - 1)  # −1 .. +1
+            p = pitch + frac * k * sigma_pitch
+            d = self.expected_distance(name, p)
+            if not math.isfinite(d):
+                continue
+            if d < e_min:
+                e_min = d
+            if d > e_max:
+                e_max = d
+        if e_max == -math.inf:
+            return math.inf, math.inf
+        return e_min, e_max
 
     def classify(
         self,
@@ -246,9 +348,40 @@ class GroundGeometry:
             )
 
         if not ground_expected:
-            # Ray was never going to see the floor; any hit is an obstacle.
+            # At `pitch_est` the rotated ray points upward (or past
+            # RF_MAX_RANGE) so no floor hit is expected. This verdict is
+            # safe for strictly horizontal/upward beams, but ground-
+            # facing beams whose mounting aims at the floor can land
+            # here when the estimator is in a collision transient —
+            # producing stamped "obstacles" that are actually the floor.
+            #
+            # Mitigation: re-sample expected_distance over a pitch
+            # envelope and check whether the measurement is plausibly a
+            # ground hit at any pitch the estimator could realistically
+            # have. If yes → suppress as flat. If no → trust the
+            # original verdict.
+            # (envelope check disabled here — experimentally it killed
+            # ~70% of rf_B's legitimate rear-wall detections because
+            # rf_B's nominal ground-hit distance sits at ~1.93 m, too
+            # close to RF_MAX_RANGE for any envelope to disambiguate
+            # ground from a real wall at the same range. Collision-
+            # transient FPs are handled via the post-collision laser
+            # lockout in Navigator.compensate_rangefinders instead.)
+            # Ray was never going to see the floor; any hit is an
+            # obstacle. Side beams (rf_SL, rf_SR) are not ground-facing
+            # so their "no_ground_expected" verdict is the expected
+            # baseline, not a collision artifact — promote their hits
+            # to confident whenever the measurement is well inside
+            # RF_MAX_RANGE. Ground-facing beams in this branch are
+            # ambiguous (pitch error may have flipped the ray upward
+            # erroneously) so their confidence stays False.
+            side_confident = (
+                not self._ground_facing.get(name, False)
+                and measured < RF_MAX_RANGE - 0.1
+            )
             return GroundReading(
-                name, measured, expected, float("nan"), float("nan"), "obstacle"
+                name, measured, expected,
+                float("nan"), float("nan"), "obstacle", side_confident,
             )
 
         # ── Propagate pitch uncertainty into the tolerance ──
@@ -283,7 +416,21 @@ class GroundGeometry:
             kind = "obstacle"
         else:
             kind = "flat"
-        return GroundReading(name, measured, expected, deviation, tol, kind)
+        # Confidence: the obstacle verdict is robust to pitch noise only
+        # when the hit is unambiguously closer than the flat-ground
+        # expectation by several tolerances AND by an absolute minimum.
+        # Side beams (not ground-facing) that return a finite reading
+        # are trivially confident whenever they classify as obstacle,
+        # since their "ground_expected" is an artifact of the pod tilt
+        # and a sub-max-range hit can only be a solid object.
+        confident = (
+            kind == "obstacle"
+            and deviation < -CONFIDENT_DEV_TOL_RATIO * tol
+            and deviation < -CONFIDENT_DEV_ABS_MIN
+        )
+        return GroundReading(
+            name, measured, expected, deviation, tol, kind, confident
+        )
 
     def horizontal_distance(self, name: str, pitch: float, measured: float) -> float:
         """

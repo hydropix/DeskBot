@@ -213,9 +213,11 @@ def run_episode(
     estimator = StateEstimator(dt)
     controller = BalanceController()
     navigator = Navigator(
-        dt, mj_model=model, use_astar=(planner == "astar"),
+        dt, mj_model=model,
+        use_astar=(planner in ("astar", "astar_pf")),
         use_early_avoid=early_avoid,
         early_k=early_k,
+        use_potential_field=(planner == "astar_pf"),
     )
 
     # Warmup

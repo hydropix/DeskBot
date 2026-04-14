@@ -30,6 +30,8 @@ from deskbot.astar_local import (
     LOCAL_HORIZON as ASTAR_LOCAL_HORIZON,
     GOAL_SEARCH_RADIUS,
     INFLATE_CELLS,
+    POTENTIAL_GAIN,
+    POTENTIAL_LAMBDA_CELLS,
     inflate_mask,
     nearest_free_cell,
     path_initial_tangent,
@@ -139,11 +141,11 @@ STUCK_DIST = 0.06
 # of the chassis at impact) ends up clearly OUTSIDE CAUTION_DIST after
 # the reverse — otherwise the robot re-enters GO_HEADING still close
 # enough that CONTOUR's pivot-and-drive sweeps the chassis back into
-# the pole. With speed=-0.25 m/s and duration=1.8 s the robot retreats
-# ~0.45 m actual, leaving the stamp at 0.14 + 0.45 ≈ 0.59 m (just below
-# CAUTION_DIST=0.65, comfortably above SAFE_DIST=0.36) so the next
-# CONTOUR pivot has room to rotate without clipping.
-REVERSE_DURATION = 1.8
+# the pole. With speed=-0.25 m/s and duration=1.2 s the robot retreats
+# ~0.30 m actual, leaving the stamp at 0.14 + 0.30 ≈ 0.44 m (below
+# CAUTION_DIST=0.65, above SAFE_DIST=0.36 with a ~0.08 m margin) so the
+# next CONTOUR pivot still has room to rotate without clipping.
+REVERSE_DURATION = 1.2
 REVERSE_SPEED = -0.25
 
 # ── Control gains ──
@@ -208,6 +210,20 @@ PHANTOM_STAMP_TTL  = 8.0         # seconds — how long a stamp stays sticky.
                                  # Long enough that after a REVERSE + re-plan
                                  # the obstacle is still on the map when the
                                  # robot loops back past the same area.
+
+# How long a confidence-robust laser hit stays sticky. Short enough
+# that a moving / removed obstacle doesn't haunt the map for long, but
+# long enough to survive dozens of frames (≥400 at 500 Hz physics)
+# during which the beams may skim past a thin pole and free-update the
+# same cell. 2 s matches the typical "see-it then plan-around-it"
+# horizon for a contour manoeuvre at 0.3 m/s.
+CONFIDENT_HIT_TTL = 2.0
+
+# Seconds of ground-facing-laser suppression following a
+# collision_detected event. 0.4 s covers the bulk of the complementary-
+# filter ringing after a stiff impact (empirically observed up to
+# ~0.25 s of large pitch-estimate error) with a small safety margin.
+POST_COLLISION_LOCKOUT_S = 0.4
 
 
 class FSMState(Enum):
@@ -400,6 +416,30 @@ class OccupancyGrid:
                 if self.in_bounds(ci, cj):
                     self.grid[ci, cj] = LOG_ODD_MAX
 
+    def stamp_confident_hit(self, hit_x: float, hit_y: float, ttl: float):
+        """
+        Promote a confidence-robust laser hit to a sticky stamp.
+
+        Called by the Navigator when GroundGeometry.classify returns a
+        GroundReading with ``confident=True``: the measurement is so far
+        below the flat-ground expectation (or the beam is purely
+        horizontal) that it cannot be explained by pitch noise. Marking
+        the hit cell sticky with a short TTL means the next laser sweep
+        — which may skim past a narrow pole like a table leg and
+        free-update the intervening cell — cannot erase the observation
+        before the planner has had time to route around it.
+
+        A single cell is stamped (no spatial broadening), so thin
+        obstacles keep their exact footprint. The sticky list already
+        supports world-frame storage so grid shifts leave stamps in
+        place as the robot drives past.
+        """
+        self._blocked_dirty = True
+        self._sticky.append((hit_x, hit_y, ttl))
+        ci, cj = self.world_to_cell(hit_x, hit_y)
+        if self.in_bounds(ci, cj):
+            self.grid[ci, cj] = LOG_ODD_MAX
+
     def enforce_sticky(self, dt: float):
         """
         Decay TTLs and re-force LOG_ODD_MAX on every still-live sticky
@@ -522,7 +562,10 @@ class Navigator:
 
     def __init__(self, dt: float, mj_model, use_astar: bool = False,
                  use_early_avoid: bool = False,
-                 early_k: float | None = None):
+                 early_k: float | None = None,
+                 use_potential_field: bool = False,
+                 potential_gain: float | None = None,
+                 potential_lambda_cells: float | None = None):
         """
         `mj_model` is REQUIRED. The navigator depends on GroundGeometry
         for exact pitch compensation; the legacy scalar fallback has been
@@ -535,6 +578,19 @@ class Navigator:
         `use_early_avoid`: if True, adds a continuous inverse-distance
         yaw bias in GO_HEADING (session 10 early avoidance). Off by
         default; see deskbot/early_avoidance.py for the guidance law.
+
+        `use_potential_field`: if True, and when `use_astar` is also
+        True, bakes a repulsive potential φ(cell)=α·exp(-d/λ) into the
+        A* step cost. d is the Euclidean distance (in cells) to the
+        nearest inflated obstacle, computed once per replan via a
+        distance transform on the occupancy grid. This biases A* paths
+        toward the middle of free corridors without touching the
+        algorithm or the reactive layer. No-op when `use_astar` is
+        False (the planner is never invoked).
+
+        `potential_gain` / `potential_lambda_cells`: optional overrides
+        for α and λ (tuning knobs). None means use the defaults from
+        astar_local.POTENTIAL_GAIN / POTENTIAL_LAMBDA_CELLS.
         """
         if mj_model is None:
             raise ValueError(
@@ -548,6 +604,19 @@ class Navigator:
         self._use_astar = bool(use_astar)
         self._astar_path: list[tuple[int, int]] | None = None
         self._astar_last_reason: str = ""
+
+        # Potential-field augmentation of A* (opt-in). Stored as the
+        # (gain, lambda) pair passed to AStarPlanner on every replan;
+        # when `_use_potential_field` is False, we pass gain=0 which
+        # short-circuits the distance transform entirely.
+        self._use_potential_field = bool(use_potential_field)
+        self._potential_gain = (
+            POTENTIAL_GAIN if potential_gain is None else float(potential_gain)
+        )
+        self._potential_lambda_cells = (
+            POTENTIAL_LAMBDA_CELLS if potential_lambda_cells is None
+            else float(potential_lambda_cells)
+        )
 
         # Early avoidance (session 10). Off by default, only consulted
         # by _state_go_heading when self._use_early_avoid is True.
@@ -598,6 +667,26 @@ class Navigator:
         # Cached sensor data
         self._min_front_dist = 999.0
         self._rf_compensated: dict[str, float] = {}
+        self._rf_confident: set[str] = set()
+
+        # Post-collision rangefinder lockout.
+        #
+        # The IMU-based CollisionDetector fires on any impact spike.
+        # During the ~0.3-0.5 s that follow, the complementary filter
+        # in StateEstimator rings and the pitch estimate can drift by
+        # up to ~8° from truth (observed in diag_ground_filter). That
+        # transient is responsible for the bulk of "ground leaks" —
+        # downward-facing beams classify as "no ground expected"
+        # because the computed beam direction rotates past horizontal
+        # in the wrong pose, and any measured ground hit gets stamped
+        # as an obstacle. Solution: for POST_COLLISION_LOCKOUT_S
+        # seconds after a detected impact, suppress all ground-facing
+        # rangefinders (return -1) so they contribute neither free-ray
+        # updates nor phantom hits to the grid. Side beams (rf_SL,
+        # rf_SR) pass through because they are not ground-facing by
+        # construction — GroundGeometry flags them via
+        # `_ground_facing`.
+        self._collision_lockout_t = 0.0
 
     def reset(self):
         self._pos_x = 0.0
@@ -661,9 +750,24 @@ class Navigator:
         projected into the horizontal plane relative to the robot's
         pivot axis; `no_ground_expected` readings are passed through as
         obstacles since the ray never reaches the floor.
+
+        Side effect: populates `self._rf_confident` with the names of
+        sensors whose obstacle verdict is confidence-robust
+        (`GroundReading.confident`), so `_update_grid` can promote those
+        hits to sticky stamps.
+
+        While `_collision_lockout_t` is positive (see `update()`), every
+        ground-facing beam is force-suppressed regardless of
+        classification: a recent impact has put the pitch estimator in
+        a transient where the geometric filter cannot be trusted.
         """
+        lockout = self._collision_lockout_t > 0.0
         compensated: dict[str, float] = {}
+        confident: set[str] = set()
         for name, dist in rf.items():
+            if lockout and self._ground.is_ground_facing(name):
+                compensated[name] = -1.0
+                continue
             if dist < 0.0:
                 compensated[name] = -1.0
                 continue
@@ -674,12 +778,21 @@ class Navigator:
                 compensated[name] = self._ground.horizontal_distance(
                     name, pitch, dist
                 )
+                if gr.confident:
+                    confident.add(name)
+        self._rf_confident = confident
         return compensated
 
     # ── Grid update from sensors ──────────────────────────────────
 
     def _update_grid(self, rf: dict):
-        """Project rangefinder readings into occupancy grid."""
+        """Project rangefinder readings into occupancy grid.
+
+        Confident hits (flagged by GroundGeometry.classify via
+        ``self._rf_confident``) are additionally pushed onto the sticky
+        list with ``CONFIDENT_HIT_TTL`` so the stamp survives the next
+        free-update wave when another beam skims past the obstacle.
+        """
         for name, dist in rf.items():
             angle = RF_BODY_ANGLES.get(name)
             if angle is None:
@@ -694,6 +807,10 @@ class Navigator:
                 self.grid.update_ray(
                     self._pos_x, self._pos_y, hit_x, hit_y, hit=True
                 )
+                if name in self._rf_confident:
+                    self.grid.stamp_confident_hit(
+                        hit_x, hit_y, CONFIDENT_HIT_TTL
+                    )
             else:
                 end_x = self._pos_x + GRID_RAY_MAX * cos_a
                 end_y = self._pos_y + GRID_RAY_MAX * sin_a
@@ -757,6 +874,15 @@ class Navigator:
         if not self._active or estimator.fallen:
             return None, None
 
+        # Advance the post-collision lockout timer BEFORE compensating
+        # so the current frame benefits from the suppression. An impact
+        # spike in this very frame (readings.collision_detected) extends
+        # the lockout to cover the whole filter ringdown.
+        if self._collision_lockout_t > 0.0:
+            self._collision_lockout_t = max(0.0, self._collision_lockout_t - dt)
+        if readings.collision_detected:
+            self._collision_lockout_t = POST_COLLISION_LOCKOUT_S
+
         # ── 2. Compensate rangefinders ──
         rf = self.compensate_rangefinders(readings.rangefinders, estimator.pitch)
         self._rf_compensated = rf
@@ -787,7 +913,7 @@ class Navigator:
                   f"h={math.degrees(self._heading):+.0f}°")
             self.grid.stamp_obstacle_ahead(
                 self._pos_x, self._pos_y, self._heading,
-                PHANTOM_STAMP_DIST, PHANTOM_STAMP_TTL,
+                PHANTOM_STAMP_DIST, 2.0 * PHANTOM_STAMP_TTL,
             )
             # Force an immediate REVERSE. Without this, _state_go_heading
             # would see min_front_dist < SAFE_DIST on the stamped cell and
@@ -1101,7 +1227,13 @@ class Navigator:
             +1 → obstacle on LEFT,  robot contours by going RIGHT
             -1 → obstacle on RIGHT, robot contours by going LEFT
         """
-        planner = AStarPlanner(self.grid.grid, LOG_ODD_OCCUPIED_THRESHOLD)
+        gain = self._potential_gain if self._use_potential_field else 0.0
+        planner = AStarPlanner(
+            self.grid.grid,
+            LOG_ODD_OCCUPIED_THRESHOLD,
+            potential_gain=gain,
+            potential_lambda_cells=self._potential_lambda_cells,
+        )
 
         start_cell = self.grid.world_to_cell(self._pos_x, self._pos_y)
         goal_wx = self._pos_x + ASTAR_LOCAL_HORIZON * math.cos(self._target_heading)
